@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CastHub</title>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+
+<!-- Title bar -->
+<div id="titlebar">
+  <span class="logo"><span class="logo-dot"></span>CastHub</span>
+  <div class="spacer"></div>
+  <div class="win-btns">
+    <button class="win-btn wb-close"    id="btn-close"   title="Close"></button>
+    <button class="win-btn wb-minimize" id="btn-minimize" title="Minimize"></button>
+    <button class="win-btn wb-maximize" id="btn-maximize" title="Maximize"></button>
+  </div>
+</div>
+
+<div id="app">
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <div class="sidebar-header">Queue</div>
+    <div id="queue-list">
+      <div id="queue-empty" style="padding:20px 10px;text-align:center;color:var(--muted);font-size:.8rem;">No files added yet</div>
+    </div>
+    <button id="btn-add-files">+ Add Files</button>
+
+    <div id="mobile-badge">
+      <div class="mb-label">Mobile Remote</div>
+      <div class="mb-ip" id="mobile-ip-display">Loading…</div>
+      <div class="mb-hint">Open this address on your phone</div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div id="main">
+
+    <!-- Device bar -->
+    <div id="device-bar">
+      <label>Cast to:</label>
+      <select id="device-select">
+        <option value="">Scanning for devices…</option>
+      </select>
+      <div id="cast-badge" class="cast-badge">
+        <span class="dot"></span>
+        <span id="cast-badge-label">Casting</span>
+      </div>
+    </div>
+
+    <!-- Stage -->
+    <div id="stage">
+      <!-- Drop zone (idle state) -->
+      <div id="dropzone">
+        <div class="dz-icon">🎬</div>
+        <div class="dz-title">Drop a video to cast</div>
+        <div class="dz-sub">Supports MP4, MKV, AVI, MOV, HEVC, WebM and more.<br/>Your Chromecast decodes everything natively.</div>
+        <button class="dz-btn" id="dz-btn-pick">Browse Files</button>
+      </div>
+
+      <!-- Now playing (casting state) -->
+      <div id="now-playing">
+        <div class="np-device" id="np-device">Casting to —</div>
+        <div class="np-thumb">🎬</div>
+        <div class="np-title" id="np-title">—</div>
+      </div>
+    </div>
+
+    <!-- Controls bar -->
+    <div id="controls-bar">
+      <div class="seek-row">
+        <span class="time-label" id="time-current">0:00</span>
+        <input type="range" id="seek-bar" min="0" max="100" value="0" step="0.1"/>
+        <span class="time-label right" id="time-total">0:00</span>
+      </div>
+      <div class="btns-row">
+        <button class="ctrl-btn" id="btn-prev"  title="Previous">⏮</button>
+        <button class="ctrl-btn" id="btn-back"  title="-10s">↩ 10</button>
+        <button class="ctrl-btn primary" id="btn-playpause" title="Play/Pause">⏸</button>
+        <button class="ctrl-btn" id="btn-fwd"   title="+30s">30 ↪</button>
+        <button class="ctrl-btn danger" id="btn-stop" title="Stop">⏹</button>
+      </div>
+      <div class="vol-row">
+        <span class="vol-icon">🔊</span>
+        <input type="range" id="vol-bar" min="0" max="1" step="0.01" value="1"/>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<script src="renderer.js"></script>
+</body>
+</html>

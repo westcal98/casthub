@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <meta name="theme-color" content="#09090f"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <title>CastHub Remote</title>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+
+<header>
+  <div class="logo"><div class="logo-dot"></div>CastHub</div>
+  <div class="conn-indicator">
+    <div class="conn-dot" id="conn-dot"></div>
+    <span id="conn-label">Disconnected</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Setup page ── -->
+  <div class="page active" id="page-setup">
+    <div class="setup-wrap">
+      <div class="setup-card">
+        <h2>Connect to Desktop</h2>
+        <p>Open CastHub on your PC and enter the WebSocket address shown in the sidebar.</p>
+        <div class="input-group">
+          <input type="text" id="ws-input" placeholder="192.168.1.100:8766" inputmode="url"/>
+          <button class="btn-primary" id="btn-connect">Connect</button>
+        </div>
+        <div class="status-msg" id="setup-status"></div>
+      </div>
+      <div class="setup-card">
+        <h2>How it works</h2>
+        <p>Your phone and PC must be on the same Wi-Fi network. CastHub runs a local server on your PC — this app connects to it so you can browse your files and control playback from here.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Now Playing page ── -->
+  <div class="page" id="page-np">
+    <div class="np-wrap">
+      <!-- idle -->
+      <div id="np-idle" class="idle-msg">
+        <div class="idle-icon">📺</div>
+        <div>Nothing casting yet.</div>
+        <div style="margin-top:8px;font-size:.78rem;">Pick a file from the Files tab.</div>
+      </div>
+      <!-- active -->
+      <div id="np-active" style="display:none">
+        <div class="np-thumb-mob">🎬</div>
+        <div class="np-info">
+          <div class="np-title-mob" id="mob-title">—</div>
+          <div class="np-device-mob" id="mob-device">—</div>
+        </div>
+        <div class="seek-row">
+          <span class="t-label" id="mob-current">0:00</span>
+          <input type="range" id="mob-seek" min="0" max="100" value="0" step="0.5"/>
+          <span class="t-label right" id="mob-total">0:00</span>
+        </div>
+        <div class="ctrl-row">
+          <button class="cb" id="mob-back"  title="-10s">↩</button>
+          <button class="cb" id="mob-prev"  title="Prev">⏮</button>
+          <button class="cb big" id="mob-playpause">▶</button>
+          <button class="cb" id="mob-stop" title="Stop">⏹</button>
+          <button class="cb" id="mob-fwd"  title="+30s">↪</button>
+        </div>
+        <div class="vol-row">
+          <span class="vol-icon">🔇</span>
+          <input type="range" id="mob-vol" min="0" max="1" step="0.02" value="1"/>
+          <span class="vol-icon">🔊</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Files page ── -->
+  <div class="page" id="page-files">
+    <div class="files-wrap">
+      <div class="breadcrumb" id="breadcrumb"></div>
+      <ul class="file-list" id="file-list">
+        <li class="loading-msg">Connect to desktop to browse files.</li>
+      </ul>
+    </div>
+  </div>
+
+</main>
+
+<nav>
+  <button class="tab-btn active" data-tab="np">
+    <span class="tab-icon">▶</span>Now Playing
+  </button>
+  <button class="tab-btn" data-tab="files">
+    <span class="tab-icon">🗂️</span>Files
+  </button>
+  <button class="tab-btn" data-tab="setup">
+    <span class="tab-icon">⚙️</span>Settings
+  </button>
+</nav>
+
+<script src="app.js"></script>
+</body>
+</html>

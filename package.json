@@ -1,0 +1,20 @@
+{
+  "name": "casthub",
+  "version": "0.1.0",
+  "description": "Local media caster for Chromecast with mobile remote",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --inspect",
+    "deploy:mobile": "npx wrangler pages deploy mobile --project-name casthub-mobile"
+  },
+  "dependencies": {
+    "bonjour-service": "^1.2.1",
+    "castv2-client": "^1.2.0",
+    "express": "^4.18.2",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "electron": "^27.1.0"
+  }
+}
