@@ -140,6 +140,45 @@ class CastManager {
     });
   }
 
+
+  // Stop media without closing TCP connection (used for LIVE stream pause)
+  softStop() {
+    return new Promise(resolve => {
+      if (!this.player) return resolve();
+      if (this._statusInterval) { clearInterval(this._statusInterval); this._statusInterval = null; }
+      this.player.stop(err => {
+        if (err) console.error('[CastHub] softStop error:', err.message);
+        // Keep client + player alive for reloadURL
+        resolve();
+      });
+    });
+  }
+
+  // Reload media on existing connection — much faster than full castURL()
+  reloadURL(url, title) {
+    return new Promise((resolve, reject) => {
+      if (!this.player) return reject(new Error('No active player'));
+      const isRemux      = url.includes('/remux');
+      const contentType  = isRemux ? 'video/x-matroska' : 'video/mp4';
+      const streamType   = isRemux ? 'LIVE' : 'BUFFERED';
+      const media = { contentId: url, contentType, streamType,
+                      metadata: { type:0, metadataType:0, title: title || this.state.title } };
+      if (this._statusInterval) { clearInterval(this._statusInterval); this._statusInterval = null; }
+      this.player.load(media, { autoplay: true }, (err, status) => {
+        if (err) return reject(err);
+        this.state.status = 'playing';
+        this.state.title  = title || this.state.title;
+        this._applyStatus(status);
+        this._statusInterval = setInterval(() => {
+          if (this.player && this.state.status === 'playing') {
+            this.player.getStatus((err, s) => { if (s && !err) this._applyStatus(s); });
+          }
+        }, 1000);
+        resolve();
+      });
+    });
+  }
+
   getState() { return { ...this.state }; }
 }
 

@@ -15,6 +15,16 @@ const castManager = new CastManager();
 
 // Broadcast state to renderer + mobile whenever cast state changes
 castManager._onStateChange = (state) => {
+  // For LIVE streams: Chromecast always reports currentTime:0 — use local timer instead
+  if (currentFileIsLive) {
+    if (livePausedAt !== null) {
+      state = { ...state, status:'paused', currentTime:livePausedAt,
+                duration:liveDuration || state.duration, connected:true };
+    } else if (liveStartedAt !== null) {
+      state = { ...state, currentTime:getLiveTime(),
+                duration:liveDuration || state.duration };
+    }
+  }
   mainWindow?.webContents.send('cast-state', state);
   broadcast({ type: 'state', ...state });
 };
@@ -177,9 +187,10 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
 
       if (action === 'pause') {
         livePausedAt = getLiveTime();
-        if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
-        await castManager.control('stop');
-        const ps = { ...castManager.getState(), status:'paused', currentTime:livePausedAt, duration:liveDuration };
+        stopLiveTimer();
+        await castManager.softStop();
+        const ps = { ...castManager.getState(), status:'paused',
+                     currentTime:livePausedAt, duration:liveDuration, connected:true };
         mainWindow?.webContents.send('cast-state', ps);
         broadcast({ type:'state', ...ps });
         return { success: true };
@@ -187,23 +198,27 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
 
       if (action === 'play') {
         const resumeAt = livePausedAt !== null ? livePausedAt : getLiveTime();
+        livePausedAt = null;
         const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(resumeAt)}`;
-        await castManager.castURL(st.deviceHost, url, st.title);
+        try { await castManager.reloadURL(url, st.title); }
+        catch { await castManager.castURL(st.deviceHost, url, st.title); }
         startLiveTimer(resumeAt, liveDuration);
-        const ns = castManager.getState();
-        broadcast({ type:'state', ...ns, currentTime:resumeAt });
-        mainWindow?.webContents.send('cast-state', { ...ns, currentTime:resumeAt });
+        const ns = { ...castManager.getState(), currentTime:resumeAt, duration:liveDuration };
+        broadcast({ type:'state', ...ns });
+        mainWindow?.webContents.send('cast-state', ns);
         return { success: true };
       }
 
       if (action === 'seek') {
         const seekTo = Math.floor(value);
+        livePausedAt = null;
         const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${seekTo}`;
-        await castManager.castURL(st.deviceHost, url, st.title);
+        try { await castManager.reloadURL(url, st.title); }
+        catch { await castManager.castURL(st.deviceHost, url, st.title); }
         startLiveTimer(seekTo, liveDuration);
-        const ns = castManager.getState();
-        broadcast({ type:'state', ...ns, currentTime:seekTo });
-        mainWindow?.webContents.send('cast-state', { ...ns, currentTime:seekTo });
+        const ns = { ...castManager.getState(), currentTime:seekTo, duration:liveDuration };
+        broadcast({ type:'state', ...ns });
+        mainWindow?.webContents.send('cast-state', ns);
         return { success: true };
       }
     }
