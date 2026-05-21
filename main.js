@@ -63,7 +63,7 @@ function startLiveTimer(seekOffset, duration) {
 function stopLiveTimer() {
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
   liveStartedAt = null;
-  livePausedAt  = null;
+  // livePausedAt intentionally NOT cleared here — managed by pause/resume actions
 }
 
 function createWindow() {
