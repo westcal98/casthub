@@ -1,7 +1,7 @@
 'use strict';
 const api = window.castHub;
 
-let queue = [], devices = [], castState = null, activeIdx = -1, seekDragging = false, isCasting = false, autoPlay = false;
+let queue = [], devices = [], castState = null, activeIdx = -1, seekDragging = false, isCasting = false, autoPlay = false, disconnecting = false;
 
 const $ = id => document.getElementById(id);
 const queueList       = $('queue-list'),    queueEmpty    = $('queue-empty');
@@ -122,6 +122,7 @@ function showIdle() {
 }
 
 function applyState(state) {
+  if (disconnecting) return;
   castState = state;
   if (!state || state.status === 'idle' || !state.connected) { showIdle(); return; }
   isCasting = true;
@@ -140,9 +141,11 @@ async function ctrl(action, value) {
 }
 
 btnDisconnect.addEventListener('click', async () => {
+  disconnecting = true;
   isCasting = false;
   showIdle();
   await api.disconnect();
+  disconnecting = false;
 });
 $('btn-playpause').addEventListener('click', () => {
   if (isCasting) {
@@ -154,9 +157,11 @@ $('btn-playpause').addEventListener('click', () => {
   }
 });
 $('btn-stop').addEventListener('click', async () => {
+  disconnecting = true;
   isCasting = false;
   showIdle();
   await api.disconnect();
+  disconnecting = false;
 });
 $('btn-fwd').addEventListener('click',   () => ctrl('seek', (castState?.currentTime||0) + 30));
 $('btn-back').addEventListener('click',  () => ctrl('seek', Math.max(0, (castState?.currentTime||0) - 10)));

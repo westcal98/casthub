@@ -123,19 +123,21 @@ class CastManager {
   disconnect() {
     // Tells Chromecast to dismiss the receiver app entirely
     return new Promise(resolve => {
-      if (!this.client) return resolve();
       if (this._statusInterval) { clearInterval(this._statusInterval); this._statusInterval = null; }
-      try {
-        this.client.stop(() => {
-          try { this.client.close(); } catch {}
-          this.client = null; this.player = null;
-          this.state.connected = false; this.state.status = 'idle';
-          resolve();
-        });
-      } catch {
-        try { this.client.close(); } catch {}
+      const cleanup = () => {
+        try { this.client?.close(); } catch {}
         this.client = null; this.player = null;
+        this.state.connected = false; this.state.status = 'idle';
         resolve();
+      };
+      if (!this.client) return cleanup();
+      if (this.player) {
+        // client.stop(session, callback) — session required as first arg
+        try {
+          this.client.stop(this.player, () => cleanup());
+        } catch { cleanup(); }
+      } else {
+        cleanup();
       }
     });
   }
