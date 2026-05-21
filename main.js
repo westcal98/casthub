@@ -30,6 +30,7 @@ castManager._onStateChange = (state) => {
 };
 let currentFilePath   = null;
 let currentFileIsLive = false;
+let lastDeviceHost    = null;  // persists after disconnect for before-quit
 
 // ── Live stream time tracking ──────────────────────────────────────
 let liveTimer     = null;
@@ -133,14 +134,17 @@ async function handleTSSeek(seconds) {
 }
 
 app.on('before-quit', (e) => {
-  if (!castManager.getState().connected) {
+  // Dismiss receiver if we ever connected — even if user already clicked Stop
+  if (!lastDeviceHost && !castManager.getState().connected) {
     stopFileServer(); stopWSServer();
     return;
   }
   e.preventDefault();
+  stopLiveTimer();
   castManager.disconnect().finally(() => {
     stopFileServer();
     stopWSServer();
+    lastDeviceHost = null;
     app.exit(0);
   });
 });
@@ -161,6 +165,20 @@ ipcMain.handle('load-queue', () => {
 ipcMain.handle('get-local-ip',   () => getLocalIP());
 ipcMain.handle('get-cast-state', () => castManager.getState());
 
+ipcMain.handle('disconnect', async () => {
+  try {
+    stopLiveTimer();
+    currentFilePath  = null;
+    currentFileIsLive = false;
+    await castManager.disconnect();
+    lastDeviceHost = null;
+    const state = castManager.getState();
+    mainWindow?.webContents.send('cast-state', state);
+    broadcast({ type:'state', ...state });
+    return { success: true };
+  } catch(err) { return { success:false, error:err.message }; }
+});
+
 ipcMain.handle('open-file', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile','multiSelections'],
@@ -172,6 +190,7 @@ ipcMain.handle('open-file', async () => {
 ipcMain.handle('cast-file', async (_, { filePath, deviceHost }) => {
   try {
     const url = await buildCastURL(filePath, 0);
+    lastDeviceHost = deviceHost;
     await castManager.castURL(deviceHost, url, path.basename(filePath));
     const state = castManager.getState();
     broadcast({ type:'state', ...state });

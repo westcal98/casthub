@@ -139,7 +139,11 @@ async function ctrl(action, value) {
   if (!r.success) console.error('Control error:', r.error);
 }
 
-btnDisconnect.addEventListener('click', () => { isCasting = false; ctrl('stop'); showIdle(); });
+btnDisconnect.addEventListener('click', async () => {
+  isCasting = false;
+  showIdle();
+  await api.disconnect();
+});
 $('btn-playpause').addEventListener('click', () => {
   if (isCasting) {
     // Already casting — toggle play/pause
@@ -149,7 +153,11 @@ $('btn-playpause').addEventListener('click', () => {
     castItem(activeIdx);
   }
 });
-$('btn-stop').addEventListener('click',  () => { isCasting = false; ctrl('stop'); showIdle(); });
+$('btn-stop').addEventListener('click', async () => {
+  isCasting = false;
+  showIdle();
+  await api.disconnect();
+});
 $('btn-fwd').addEventListener('click',   () => ctrl('seek', (castState?.currentTime||0) + 30));
 $('btn-back').addEventListener('click',  () => ctrl('seek', Math.max(0, (castState?.currentTime||0) - 10)));
 $('btn-prev').addEventListener('click', () => { if (activeIdx > 0) castItem(activeIdx - 1); });
