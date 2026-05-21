@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>CastHub Receiver</title>
+  <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <style>
+    * { margin: 0; padding: 0; }
+    body { background: #000; width: 100vw; height: 100vh; overflow: hidden; }
+    cast-media-player { width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+  <cast-media-player></cast-media-player>
+  <script>
+    window.addEventListener('load', function() {
+      const context = cast.framework.CastReceiverContext.getInstance();
+      const options  = new cast.framework.CastReceiverOptions();
+      options.disableIdleTimeout = true;
+      options.maxInactivity = 3600;
+      context.start(options);
+    });
+  </script>
+</body>
+</html>

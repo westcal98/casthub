@@ -1,82 +1,52 @@
 'use strict';
 const api = window.castHub;
 
-// ── State ──────────────────────────────────────────────────────────
-let queue      = [];    // { id, path, name, size }
-let devices    = [];    // { name, host }
-let castState  = null;
-let activeIdx  = -1;
-let seekDragging = false;
+let queue = [], devices = [], castState = null, activeIdx = -1, seekDragging = false, isCasting = false, autoPlay = false;
 
-// ── Elements ───────────────────────────────────────────────────────
-const queueList       = document.getElementById('queue-list');
-const queueEmpty      = document.getElementById('queue-empty');
-const deviceSelect    = document.getElementById('device-select');
-const castBadge       = document.getElementById('cast-badge');
-const castBadgeLabel  = document.getElementById('cast-badge-label');
-const dropzone        = document.getElementById('dropzone');
-const nowPlaying      = document.getElementById('now-playing');
-const controlsBar     = document.getElementById('controls-bar');
-const npTitle         = document.getElementById('np-title');
-const npDevice        = document.getElementById('np-device');
-const btnPlayPause    = document.getElementById('btn-playpause');
-const seekBar         = document.getElementById('seek-bar');
-const volBar          = document.getElementById('vol-bar');
-const timeCurrent     = document.getElementById('time-current');
-const timeTotal       = document.getElementById('time-total');
-const mobileIPDisplay = document.getElementById('mobile-ip-display');
+const $ = id => document.getElementById(id);
+const queueList       = $('queue-list'),    queueEmpty    = $('queue-empty');
+const deviceSelect    = $('device-select'), castBadge     = $('cast-badge');
+const castBadgeLabel  = $('cast-badge-label'), btnDisconnect = $('btn-disconnect');
+const dropzone        = $('dropzone'),      nowPlaying    = $('now-playing');
+const controlsBar     = $('controls-bar'), npTitle        = $('np-title');
+const npDevice        = $('np-device'),    btnPlayPause   = $('btn-playpause');
+const seekBar         = $('seek-bar'),     volBar         = $('vol-bar');
+const timeCurrent     = $('time-current'), timeTotal      = $('time-total');
+const mobileIPDisplay = $('mobile-ip-display');
 
-// ── Helpers ────────────────────────────────────────────────────────
-function fmt(secs) {
-  if (!secs || isNaN(secs)) return '0:00';
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  const s = Math.floor(secs % 60);
-  return h > 0
-    ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
-    : `${m}:${String(s).padStart(2,'0')}`;
+function fmt(s) {
+  if (!s || isNaN(s)) return '0:00';
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60);
+  return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}` : `${m}:${String(sec).padStart(2,'0')}`;
 }
-
-function fmtSize(bytes) {
-  if (!bytes) return '';
-  if (bytes > 1e9) return `${(bytes/1e9).toFixed(1)} GB`;
-  if (bytes > 1e6) return `${(bytes/1e6).toFixed(0)} MB`;
-  return `${(bytes/1e3).toFixed(0)} KB`;
-}
-
 function uid() { return Math.random().toString(36).slice(2); }
 
-// ── Queue ──────────────────────────────────────────────────────────
 function addFiles(paths) {
-  paths.forEach(p => {
-    if (queue.find(q => q.path === p)) return;
-    queue.push({ id: uid(), path: p, name: p.split(/[\\/]/).pop(), size: null });
-  });
+  paths.forEach(p => { if (!queue.find(q => q.path === p)) queue.push({ id:uid(), path:p, name:p.split(/[\\/]/).pop() }); });
   renderQueue();
+}
+
+function toggleAutoPlay() {
+  autoPlay = !autoPlay;
+  const btn = $('btn-autoplay');
+  if (btn) btn.textContent = autoPlay ? '🔁 Auto-play ON' : '🔁 Auto-play';
+}
+
+function saveQueue() {
+  try { api.saveQueue(queue.map(i => ({ id:i.id, path:i.path, name:i.name }))); } catch(e) {}
 }
 
 function renderQueue() {
   queueEmpty.style.display = queue.length ? 'none' : '';
-  // Clear existing items
   [...queueList.querySelectorAll('.queue-item')].forEach(e => e.remove());
-
   queue.forEach((item, i) => {
     const el = document.createElement('div');
     el.className = 'queue-item' + (i === activeIdx ? ' active' : '');
     el.dataset.idx = i;
-    el.innerHTML = `
-      <span class="qi-icon">🎬</span>
-      <div class="qi-info">
-        <div class="qi-name">${item.name}</div>
-        ${item.size ? `<div class="qi-size">${fmtSize(item.size)}</div>` : ''}
-      </div>
-      <button class="qi-remove" data-idx="${i}" title="Remove">✕</button>`;
-    el.addEventListener('click', (e) => {
-      if (e.target.classList.contains('qi-remove')) {
-        removeFromQueue(parseInt(e.target.dataset.idx));
-      } else {
-        castItem(parseInt(el.dataset.idx));
-      }
+    el.innerHTML = `<span class="qi-icon">🎬</span><div class="qi-info"><div class="qi-name">${item.name}</div></div><button class="qi-remove" data-idx="${i}" title="Remove">✕</button>`;
+    el.addEventListener('click', e => {
+      if (e.target.classList.contains('qi-remove')) removeFromQueue(+e.target.dataset.idx);
+      else selectItem(+el.dataset.idx);
     });
     queueList.appendChild(el);
   });
@@ -84,12 +54,11 @@ function renderQueue() {
 
 function removeFromQueue(idx) {
   queue.splice(idx, 1);
-  if (activeIdx === idx) activeIdx = -1;
-  else if (activeIdx > idx) activeIdx--;
+  if (activeIdx === idx) activeIdx = -1; else if (activeIdx > idx) activeIdx--;
+  saveQueue();
   renderQueue();
 }
 
-// ── Devices ────────────────────────────────────────────────────────
 function renderDevices() {
   const prev = deviceSelect.value;
   deviceSelect.innerHTML = devices.length
@@ -98,113 +67,138 @@ function renderDevices() {
   if (prev && devices.find(d => d.host === prev)) deviceSelect.value = prev;
 }
 
-// ── Casting ────────────────────────────────────────────────────────
+function selectItem(idx) {
+  activeIdx = idx;
+  renderQueue();
+  // Show a "ready to play" state without actually casting
+  const device = deviceSelect.value;
+  if (queue[idx]) {
+    npTitle.textContent  = queue[idx].name;
+    npDevice.textContent = device ? `Ready to cast to ${devices.find(d=>d.host===device)?.name||device}` : 'Select a device above';
+    dropzone.style.display   = 'none';
+    nowPlaying.style.display = 'flex';
+    controlsBar.style.display = 'block';
+    btnPlayPause.textContent = '▶';
+  }
+}
+
 async function castItem(idx) {
   const device = deviceSelect.value;
   if (!device) return alert('No Chromecast selected.');
   if (!queue[idx]) return;
-
-  activeIdx = idx;
-  renderQueue();
-
+  activeIdx = idx; renderQueue();
+  applyState({ connected:true, status:'buffering', title:queue[idx].name,
+    deviceName: devices.find(d => d.host === device)?.name || device,
+    currentTime:0, duration:0, volume:1, muted:false });
   const result = await api.castFile({ filePath: queue[idx].path, deviceHost: device });
   if (!result.success) {
     alert(`Cast error: ${result.error}`);
-    activeIdx = -1;
-    renderQueue();
+    activeIdx = -1; renderQueue();
+    applyState({ connected:false, status:'idle' });
   }
 }
 
 function showCasting(state) {
-  dropzone.style.display     = 'none';
-  nowPlaying.style.display   = 'flex';
-  controlsBar.style.display  = 'block';
-  castBadge.style.display    = 'flex';
-  npTitle.textContent        = state.title || 'Unknown';
-  npDevice.textContent       = `Casting to ${state.deviceName || '—'}`;
+  btnDisconnect.classList.remove('hidden');
+  castBadge.style.display   = 'flex';
+  dropzone.style.display    = 'none';
+  nowPlaying.style.display  = 'flex';
+  controlsBar.style.display = 'block';
+  npTitle.textContent       = state.title || 'Unknown';
+  npDevice.textContent      = `Casting to ${state.deviceName || '—'}`;
   castBadgeLabel.textContent = `Casting · ${state.deviceName || ''}`;
 }
 
 function showIdle() {
+  isCasting = false;
+  btnDisconnect.classList.add('hidden');
+  castBadge.style.display   = 'none';
   dropzone.style.display    = '';
   nowPlaying.style.display  = 'none';
   controlsBar.style.display = 'none';
-  castBadge.style.display   = 'none';
 }
 
 function applyState(state) {
   castState = state;
   if (!state || state.status === 'idle' || !state.connected) { showIdle(); return; }
   showCasting(state);
-
-  btnPlayPause.textContent  = state.status === 'playing' ? '⏸' : '▶';
-  if (!seekDragging) {
-    seekBar.max   = state.duration || 100;
-    seekBar.value = state.currentTime || 0;
-  }
+  btnPlayPause.textContent = state.status === 'playing' ? '⏸' : '▶';
+  if (!seekDragging) { seekBar.max = state.duration || 100; seekBar.value = state.currentTime || 0; }
   timeCurrent.textContent = fmt(state.currentTime);
   timeTotal.textContent   = fmt(state.duration);
   volBar.value            = state.muted ? 0 : (state.volume ?? 1);
 }
 
-// ── Control actions ────────────────────────────────────────────────
 async function ctrl(action, value) {
-  const res = await api.castControl({ action, value });
-  if (!res.success) console.error('Control error:', res.error);
+  const r = await api.castControl({ action, value });
+  if (!r.success) console.error('Control error:', r.error);
 }
 
-document.getElementById('btn-playpause').addEventListener('click', () => {
-  ctrl(castState?.status === 'playing' ? 'pause' : 'play');
+btnDisconnect.addEventListener('click', () => { isCasting = false; ctrl('stop'); showIdle(); });
+$('btn-playpause').addEventListener('click', () => {
+  if (isCasting) {
+    // Already casting — toggle play/pause
+    ctrl(castState?.status === 'playing' ? 'pause' : 'play');
+  } else if (activeIdx >= 0) {
+    // Not casting — start playing selected item
+    castItem(activeIdx);
+  }
 });
-document.getElementById('btn-stop').addEventListener('click', () => ctrl('stop'));
-document.getElementById('btn-fwd').addEventListener('click',  () => ctrl('seek', (castState?.currentTime || 0) + 30));
-document.getElementById('btn-back').addEventListener('click', () => ctrl('seek', Math.max(0, (castState?.currentTime || 0) - 10)));
+$('btn-stop').addEventListener('click',  () => { isCasting = false; ctrl('stop'); showIdle(); });
+$('btn-fwd').addEventListener('click',   () => ctrl('seek', (castState?.currentTime||0) + 30));
+$('btn-back').addEventListener('click',  () => ctrl('seek', Math.max(0, (castState?.currentTime||0) - 10)));
+$('btn-prev').addEventListener('click', () => { if (activeIdx > 0) castItem(activeIdx - 1); });
+$('btn-next').addEventListener('click', () => { if (activeIdx < queue.length - 1) castItem(activeIdx + 1); });
 
-document.getElementById('btn-prev').addEventListener('click', () => {
-  if (activeIdx > 0) castItem(activeIdx - 1);
+// Auto-play: when status goes IDLE and autoPlay is on, play next
+api.onCastState(s => {
+  if (s.status === 'idle' && isCasting && autoPlay && activeIdx >= 0 && activeIdx < queue.length - 1) {
+    setTimeout(() => castItem(activeIdx + 1), 1000);
+  }
+  applyState(s);
 });
 
 seekBar.addEventListener('mousedown', () => { seekDragging = true; });
 seekBar.addEventListener('mouseup',   () => { seekDragging = false; ctrl('seek', parseFloat(seekBar.value)); });
-volBar.addEventListener('input',      () => ctrl('volume', parseFloat(volBar.value)));
+volBar.addEventListener('input', () => ctrl('volume', parseFloat(volBar.value)));
 
-// ── Drag & drop ────────────────────────────────────────────────────
-const stage = document.getElementById('stage');
+const stage = $('stage');
 stage.addEventListener('dragover',  e => { e.preventDefault(); dropzone.classList.add('over'); });
-stage.addEventListener('dragleave', ()  => dropzone.classList.remove('over'));
+stage.addEventListener('dragleave', () => dropzone.classList.remove('over'));
 stage.addEventListener('drop', e => {
-  e.preventDefault();
-  dropzone.classList.remove('over');
+  e.preventDefault(); dropzone.classList.remove('over');
   const paths = [...e.dataTransfer.files]
     .filter(f => /\.(mp4|mkv|avi|mov|hevc|ts|m4v|wmv|flv|webm)$/i.test(f.name))
     .map(f => f.path);
-  if (paths.length) { addFiles(paths); castItem(queue.length - paths.length); }
+  if (paths.length) { addFiles(paths); }
 });
 
-// ── File picker ────────────────────────────────────────────────────
 async function pickFiles() {
   const paths = await api.openFile();
-  if (paths?.length) { addFiles(paths); if (activeIdx < 0) castItem(0); }
+  if (paths?.length) { addFiles(paths); }
 }
-document.getElementById('btn-add-files').addEventListener('click', pickFiles);
-document.getElementById('dz-btn-pick').addEventListener('click',  pickFiles);
+$('btn-add-files').addEventListener('click', pickFiles);
+$('dz-btn-pick').addEventListener('click',   pickFiles);
 dropzone.addEventListener('dblclick', pickFiles);
 
-// ── Window controls ────────────────────────────────────────────────
-document.getElementById('btn-close').addEventListener('click',    () => api.close());
-document.getElementById('btn-minimize').addEventListener('click', () => api.minimize());
-document.getElementById('btn-maximize').addEventListener('click', () => api.maximize());
+$('btn-close').addEventListener('click',    () => api.close());
+$('btn-minimize').addEventListener('click', () => api.minimize());
+$('btn-maximize').addEventListener('click', () => api.maximize());
 
-// ── IPC listeners ─────────────────────────────────────────────────
 api.onDevicesUpdated(d => { devices = d; renderDevices(); });
-api.onCastState(s => applyState(s));
 
-// ── Init ───────────────────────────────────────────────────────────
+// Restore queue from last session
+try {
+  const saved = JSON.parse(localStorage.getItem('casthub_queue') || '[]');
+  if (saved.length) { queue = saved; renderQueue(); }
+} catch {}
+
 (async () => {
-  const ip    = await api.getLocalIP();
-  const state = await api.getCastState();
-  // Mobile PWA hosted on Cloudflare — show connection address in sidebar
+  const [ip, existingDevices, state, savedQueue] = await Promise.all([
+    api.getLocalIP(), api.getDevices(), api.getCastState(), api.loadQueue()
+  ]);
   mobileIPDisplay.innerHTML = `<span style="opacity:.6">ws://</span>${ip}:8766`;
-  mobileIPDisplay.title     = 'WebSocket address — enter this in the mobile app settings';
+  if (existingDevices?.length) { devices = existingDevices; renderDevices(); }
+  if (savedQueue?.length) { queue = savedQueue; renderQueue(); }
   applyState(state);
 })();
