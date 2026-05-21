@@ -18,9 +18,43 @@ castManager._onStateChange = (state) => {
   mainWindow?.webContents.send('cast-state', state);
   broadcast({ type: 'state', ...state });
 };
-let currentHLSSession = null;
 let currentFilePath   = null;
 let currentFileIsLive = false;
+
+// ── Live stream time tracking ──────────────────────────────────────
+let liveTimer     = null;
+let liveSeekBase  = 0;
+let liveStartedAt = null;
+let livePausedAt  = null;
+let liveDuration  = 0;
+
+function getLiveTime() {
+  if (livePausedAt !== null) return livePausedAt;
+  if (!liveStartedAt) return liveSeekBase;
+  return liveSeekBase + (Date.now() - liveStartedAt) / 1000;
+}
+
+function startLiveTimer(seekOffset, duration) {
+  liveSeekBase  = seekOffset || 0;
+  liveStartedAt = Date.now();
+  livePausedAt  = null;
+  if (duration) liveDuration = duration;
+  if (liveTimer) clearInterval(liveTimer);
+  liveTimer = setInterval(() => {
+    if (!currentFileIsLive || !castManager.getState().connected) return;
+    const t = getLiveTime();
+    const s = { ...castManager.getState(), currentTime: t,
+                duration: liveDuration || castManager.getState().duration };
+    mainWindow?.webContents.send('cast-state', s);
+    broadcast({ type: 'state', ...s });
+  }, 500);
+}
+
+function stopLiveTimer() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  liveStartedAt = null;
+  livePausedAt  = null;
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({

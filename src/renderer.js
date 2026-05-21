@@ -124,6 +124,7 @@ function showIdle() {
 function applyState(state) {
   castState = state;
   if (!state || state.status === 'idle' || !state.connected) { showIdle(); return; }
+  isCasting = true;
   showCasting(state);
   btnPlayPause.textContent = state.status === 'playing' ? '⏸' : '▶';
   if (state.status === 'paused') btnPlayPause.textContent = '▶';
