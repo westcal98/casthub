@@ -23,6 +23,7 @@ function uid() { return Math.random().toString(36).slice(2); }
 
 function addFiles(paths) {
   paths.forEach(p => { if (!queue.find(q => q.path === p)) queue.push({ id:uid(), path:p, name:p.split(/[\\/]/).pop() }); });
+  saveQueue();
   renderQueue();
 }
 
@@ -33,7 +34,9 @@ function toggleAutoPlay() {
 }
 
 function saveQueue() {
-  try { api.saveQueue(queue.map(i => ({ id:i.id, path:i.path, name:i.name }))); } catch(e) {}
+  const data = queue.map(i => ({ id:i.id, path:i.path, name:i.name }));
+  try { localStorage.setItem('casthub_queue', JSON.stringify(data)); } catch(e) {}
+  try { api.saveQueue(data); } catch(e) {}
 }
 
 function renderQueue() {
@@ -123,6 +126,7 @@ function applyState(state) {
   if (!state || state.status === 'idle' || !state.connected) { showIdle(); return; }
   showCasting(state);
   btnPlayPause.textContent = state.status === 'playing' ? '⏸' : '▶';
+  if (state.status === 'paused') btnPlayPause.textContent = '▶';
   if (!seekDragging) { seekBar.max = state.duration || 100; seekBar.value = state.currentTime || 0; }
   timeCurrent.textContent = fmt(state.currentTime);
   timeTotal.textContent   = fmt(state.duration);

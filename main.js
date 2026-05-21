@@ -12,10 +12,6 @@ let mainWindow;
 const castManager = new CastManager();
 
 // Broadcast state to renderer + mobile whenever cast state changes
-castManager._onStateChange = (state) => {
-  mainWindow?.webContents.send('cast-state', state);
-  broadcast({ type: 'state', ...state });
-};
 
 // Broadcast state to renderer + mobile whenever cast state changes
 castManager._onStateChange = (state) => {
@@ -53,7 +49,7 @@ app.whenReady().then(async () => {
       if (cmd.action === 'cast') {
         const url = await buildCastURL(cmd.filePath, 0);
         await castManager.castURL(castManager.getState().deviceHost, url, path.basename(cmd.filePath));
-      } else if (cmd.action === 'seek' && currentHLSSession) {
+      } else if (cmd.action === 'seek' && currentFileIsLive) {
         await handleTSSeek(cmd.value);
       } else {
         await castManager.control(cmd.action, cmd.value);
@@ -71,10 +67,11 @@ async function buildCastURL(filePath, seekSeconds) {
   currentFilePath = filePath;
 
   if (TRANSCODE_EXTS.has(ext)) {
-    const { hasEAC3, hasSSA } = await getStreamInfo(filePath);
+    const { hasEAC3, hasSSA, duration } = await getStreamInfo(filePath);
     if (hasEAC3 || hasSSA) {
       console.log(`[CastHub] Needs remux — EAC3: ${hasEAC3}, SSA: ${hasSSA}`);
       currentFileIsLive = true;
+      startLiveTimer(seek, duration);
       return `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(filePath)}&seek=${seek}`;
     }
   }
@@ -84,15 +81,24 @@ async function buildCastURL(filePath, seekSeconds) {
 
 async function handleTSSeek(seconds) {
   if (!currentFilePath) return;
-  const url = `http://${getLocalIP()}:8765/transcode?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(seconds)}`;
+  const endpoint = currentFileIsLive ? 'remux' : 'transcode';
+  const url = `http://${getLocalIP()}:8765/${endpoint}?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(seconds)}`;
   const state = castManager.getState();
   await castManager.castURL(state.deviceHost, url, state.title);
+  if (currentFileIsLive) startLiveTimer(seconds, liveDuration);
 }
 
-app.on('before-quit', () => {
-  if (currentHLSSession) { stopSession(currentHLSSession); currentHLSSession = null; }
-  try { castManager.control('stop'); } catch {}
-  stopFileServer(); stopWSServer();
+app.on('before-quit', (e) => {
+  if (!castManager.getState().connected) {
+    stopFileServer(); stopWSServer();
+    return;
+  }
+  e.preventDefault();
+  castManager.disconnect().finally(() => {
+    stopFileServer();
+    stopWSServer();
+    app.exit(0);
+  });
 });
 
 ipcMain.on('win-minimize', () => mainWindow?.minimize());
@@ -132,16 +138,42 @@ ipcMain.handle('cast-file', async (_, { filePath, deviceHost }) => {
 
 ipcMain.handle('cast-control', async (_, { action, value }) => {
   try {
-    if (action === 'seek' && currentFileIsLive && currentFilePath) {
-      const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(value)}`;
-      const state = castManager.getState();
-      await castManager.castURL(state.deviceHost, url, state.title);
-      const ns = castManager.getState();
-      broadcast({ type:'state', ...ns });
-      mainWindow?.webContents.send('cast-state', ns);
-      return { success: true };
+    if (currentFileIsLive && currentFilePath) {
+      const st = castManager.getState();
+
+      if (action === 'pause') {
+        livePausedAt = getLiveTime();
+        if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+        await castManager.control('stop');
+        const ps = { ...castManager.getState(), status:'paused', currentTime:livePausedAt, duration:liveDuration };
+        mainWindow?.webContents.send('cast-state', ps);
+        broadcast({ type:'state', ...ps });
+        return { success: true };
+      }
+
+      if (action === 'play') {
+        const resumeAt = livePausedAt !== null ? livePausedAt : getLiveTime();
+        const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(resumeAt)}`;
+        await castManager.castURL(st.deviceHost, url, st.title);
+        startLiveTimer(resumeAt, liveDuration);
+        const ns = castManager.getState();
+        broadcast({ type:'state', ...ns, currentTime:resumeAt });
+        mainWindow?.webContents.send('cast-state', { ...ns, currentTime:resumeAt });
+        return { success: true };
+      }
+
+      if (action === 'seek') {
+        const seekTo = Math.floor(value);
+        const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${seekTo}`;
+        await castManager.castURL(st.deviceHost, url, st.title);
+        startLiveTimer(seekTo, liveDuration);
+        const ns = castManager.getState();
+        broadcast({ type:'state', ...ns, currentTime:seekTo });
+        mainWindow?.webContents.send('cast-state', { ...ns, currentTime:seekTo });
+        return { success: true };
+      }
     }
-    if (action === 'stop') { currentFilePath = null; currentFileIsLive = false; }
+    if (action === 'stop') { currentFilePath = null; currentFileIsLive = false; stopLiveTimer(); }
     await castManager.control(action, value);
     const state = castManager.getState();
     broadcast({ type:'state', ...state });

@@ -24,9 +24,11 @@ function getStreamInfo(filePath) {
     execFile(ffmpegPath, ['-hide_banner', '-i', filePath], (_err, stdout, stderr) => {
       const info = (stderr || '') + (stdout || '');
       const hasEAC3 = /Stream.*Audio.*(eac3|ac3b|e-ac3)/i.test(info);
-      const hasSSA  = /Stream.*Subtitle/i.test(info); // catch SSA, ASS, subt, etc.
+      const hasSSA  = /Stream.*Subtitle/i.test(info);
+      const dm = info.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+      const duration = dm ? parseInt(dm[1])*3600 + parseInt(dm[2])*60 + parseFloat(dm[3]) : 0;
       console.log(`[CastHub] Stream info for ${require('path').basename(filePath)}: EAC3=${hasEAC3} SSA=${hasSSA}`);
-      resolve({ hasEAC3, hasSSA });
+      resolve({ hasEAC3, hasSSA, duration });
     });
   });
 }

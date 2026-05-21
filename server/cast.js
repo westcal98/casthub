@@ -47,8 +47,9 @@ class CastManager {
       if (!deviceHost) return reject(new Error('No device selected'));
 
       const isHLS = url.includes('/hls/') || url.endsWith('.m3u8');
-      const isTS   = url.includes('/transcode');
-      const contentType = isHLS ? 'application/vnd.apple.mpegurl' : 'video/mp4';
+      const isTS    = url.includes('/transcode');
+      const isRemux = url.includes('/remux');
+      const contentType = isHLS ? 'application/vnd.apple.mpegurl' : isRemux ? 'video/x-matroska' : 'video/mp4';
       const streamType  = isRemux ? 'LIVE' : 'BUFFERED';
 
       this.client = new Client();
