@@ -189,9 +189,22 @@ ipcMain.handle('open-file', async () => {
 
 ipcMain.handle('cast-file', async (_, { filePath, deviceHost }) => {
   try {
-    const url = await buildCastURL(filePath, 0);
+    const url   = await buildCastURL(filePath, 0);
+    const title = path.basename(filePath);
     lastDeviceHost = deviceHost;
-    await castManager.castURL(deviceHost, url, path.basename(filePath));
+    // If receiver is already running, reloadURL skips TCP reconnect + receiver relaunch
+    // Falls back to full castURL if reload fails (e.g. first cast, or after Stop)
+    const alreadyConnected = castManager.getState().connected ||
+                             (castManager.client != null);
+    if (alreadyConnected) {
+      try {
+        await castManager.reloadURL(url, title);
+      } catch {
+        await castManager.castURL(deviceHost, url, title);
+      }
+    } else {
+      await castManager.castURL(deviceHost, url, title);
+    }
     const state = castManager.getState();
     broadcast({ type:'state', ...state });
     mainWindow?.webContents.send('cast-state', state);
