@@ -30,6 +30,14 @@
       options.maxInactivity = 3600;
       context.start(options);
 
+      // Block seeks from the TV remote — our streams are piped (no byte-range support),
+      // so native CAF seeks would stall. All seeking is handled by CastHub reloading the URL.
+      const playerManager = context.getPlayerManager();
+      playerManager.setMessageInterceptor(
+        cast.framework.messages.MessageType.SEEK,
+        () => null
+      );
+
       // Inject CSS into cast-media-player shadow DOM
       // Hides: LIVE badge, loading spinner, and centers the metadata bar
       function patchShadowDOM() {

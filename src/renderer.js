@@ -22,7 +22,12 @@ function fmt(s) {
 function uid() { return Math.random().toString(36).slice(2); }
 
 function addFiles(paths) {
-  paths.forEach(p => { if (!queue.find(q => q.path === p)) queue.push({ id:uid(), path:p, name:p.split(/[\\/]/).pop() }); });
+  paths.forEach(p => {
+    if (!queue.find(q => q.path === p)) {
+      queue.push({ id:uid(), path:p, name:p.split(/[\\/]/).pop() });
+      api.probeFile(p).catch(() => {});  // warm up probe cache before cast
+    }
+  });
   saveQueue();
   renderQueue();
 }

@@ -129,7 +129,7 @@ async function handleTSSeek(seconds) {
   const endpoint = currentFileIsLive ? 'remux' : 'transcode';
   const url = `http://${getLocalIP()}:8765/${endpoint}?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(seconds)}`;
   const state = castManager.getState();
-  await castManager.castURL(state.deviceHost, url, state.title);
+  await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration });
   if (currentFileIsLive) startLiveTimer(seconds, liveDuration);
 }
 
@@ -163,6 +163,7 @@ ipcMain.handle('load-queue', () => {
   try { return JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8')); } catch { return []; }
 });
 ipcMain.handle('get-local-ip',   () => getLocalIP());
+ipcMain.handle('probe-file',     (_, filePath) => getStreamInfo(filePath));
 ipcMain.handle('get-cast-state', () => castManager.getState());
 
 ipcMain.handle('soft-stop', async () => {
@@ -207,14 +208,15 @@ ipcMain.handle('cast-file', async (_, { filePath, deviceHost }) => {
     // Falls back to full castURL if reload fails (e.g. first cast, or after Stop)
     const alreadyConnected = castManager.getState().connected ||
                              (castManager.client != null);
+    const opts = { duration: liveDuration };
     if (alreadyConnected) {
       try {
-        await castManager.reloadURL(url, title);
+        await castManager.reloadURL(url, title, opts);
       } catch {
-        await castManager.castURL(deviceHost, url, title);
+        await castManager.castURL(deviceHost, url, title, opts);
       }
     } else {
-      await castManager.castURL(deviceHost, url, title);
+      await castManager.castURL(deviceHost, url, title, opts);
     }
     const state = castManager.getState();
     broadcast({ type:'state', ...state });
@@ -231,7 +233,8 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       if (action === 'pause') {
         livePausedAt = getLiveTime();
         stopLiveTimer();
-        await castManager.softStop();
+        // Native pause: video freezes on TV instead of showing idle screen (BUFFERED type)
+        await castManager.control('pause');
         const ps = { ...castManager.getState(), status:'paused',
                      currentTime:livePausedAt, duration:liveDuration, connected:true };
         mainWindow?.webContents.send('cast-state', ps);
@@ -240,11 +243,10 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       }
 
       if (action === 'play') {
-        const resumeAt = livePausedAt !== null ? livePausedAt : getLiveTime();
+        const resumeAt = livePausedAt ?? getLiveTime();
         livePausedAt = null;
-        const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(resumeAt)}`;
-        try { await castManager.reloadURL(url, st.title); }
-        catch { await castManager.castURL(st.deviceHost, url, st.title); }
+        // Native resume: FFmpeg was blocked by back-pressure during pause, resumes in-place
+        await castManager.control('play');
         startLiveTimer(resumeAt, liveDuration);
         const ns = { ...castManager.getState(), currentTime:resumeAt, duration:liveDuration };
         broadcast({ type:'state', ...ns });
@@ -256,8 +258,8 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
         const seekTo = Math.floor(value);
         livePausedAt = null;
         const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${seekTo}`;
-        try { await castManager.reloadURL(url, st.title); }
-        catch { await castManager.castURL(st.deviceHost, url, st.title); }
+        try { await castManager.reloadURL(url, st.title, { duration: liveDuration }); }
+        catch { await castManager.castURL(st.deviceHost, url, st.title, { duration: liveDuration }); }
         startLiveTimer(seekTo, liveDuration);
         const ns = { ...castManager.getState(), currentTime:seekTo, duration:liveDuration };
         broadcast({ type:'state', ...ns });
