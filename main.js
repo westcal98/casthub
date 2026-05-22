@@ -163,7 +163,6 @@ ipcMain.handle('load-queue', () => {
   try { return JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8')); } catch { return []; }
 });
 ipcMain.handle('get-local-ip',   () => getLocalIP());
-ipcMain.handle('probe-file',     (_, filePath) => getStreamInfo(filePath));
 ipcMain.handle('get-cast-state', () => castManager.getState());
 
 ipcMain.handle('soft-stop', async () => {

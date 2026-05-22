@@ -11,7 +11,6 @@ contextBridge.exposeInMainWorld('castHub', {
   minimize: () => ipcRenderer.send('win-minimize'),
   maximize: () => ipcRenderer.send('win-maximize'),
   close:    () => ipcRenderer.send('win-close'),
-  probeFile:  (p) => ipcRenderer.invoke('probe-file', p),
   saveQueue: (q) => ipcRenderer.invoke('save-queue', q),
   loadQueue: ()  => ipcRenderer.invoke('load-queue'),
   onDevicesUpdated: (cb) => ipcRenderer.on('devices-updated', (_, d) => cb(d)),

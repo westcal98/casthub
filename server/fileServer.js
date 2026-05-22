@@ -17,13 +17,8 @@ app.use((req, res, next) => { res.header('Access-Control-Allow-Origin', '*'); ne
 
 const { execFile } = require('child_process');
 
-// Probe file for problematic streams (EAC3 audio or SSA subtitles)
-const _streamInfoCache = new Map();
-
+// Probe file for problematic streams (EAC3 audio or any subtitle track)
 function getStreamInfo(filePath) {
-  if (_streamInfoCache.has(filePath)) {
-    return Promise.resolve(_streamInfoCache.get(filePath));
-  }
   return new Promise(resolve => {
     if (!ffmpegPath) return resolve({ hasEAC3: false, hasSSA: false, duration: 0 });
     execFile(ffmpegPath, ['-hide_banner', '-i', filePath], (_err, stdout, stderr) => {
@@ -32,10 +27,8 @@ function getStreamInfo(filePath) {
       const hasSSA  = /Stream.*Subtitle/i.test(info);
       const dm = info.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
       const duration = dm ? parseInt(dm[1])*3600 + parseInt(dm[2])*60 + parseFloat(dm[3]) : 0;
-      console.log(`[CastHub] Stream info for ${require('path').basename(filePath)}: EAC3=${hasEAC3} SSA=${hasSSA} (cached)`);
-      const result = { hasEAC3, hasSSA, duration };
-      _streamInfoCache.set(filePath, result);
-      resolve(result);
+      console.log(`[CastHub] Stream info for ${require('path').basename(filePath)}: EAC3=${hasEAC3} SSA=${hasSSA}`);
+      resolve({ hasEAC3, hasSSA, duration });
     });
   });
 }
