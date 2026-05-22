@@ -6,18 +6,8 @@
   <title>CastHub Receiver</title>
   <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
   <style>
-    *, *::before, *::after {
-      margin: 0; padding: 0; box-sizing: border-box;
-    }
-    html {
-      width: 100%; height: 100%;
-    }
-    body {
-      width: 100%; height: 100%;
-      overflow: hidden;
-      background: #000;
-      display: block;
-    }
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
     cast-media-player {
       display: block;
       position: absolute;
@@ -39,6 +29,35 @@
       options.disableIdleTimeout = true;
       options.maxInactivity = 3600;
       context.start(options);
+
+      // Inject CSS into cast-media-player shadow DOM
+      // Hides: LIVE badge, loading spinner, and centers the metadata bar
+      function patchShadowDOM() {
+        const player = document.querySelector('cast-media-player');
+        if (!player || !player.shadowRoot) {
+          setTimeout(patchShadowDOM, 500);
+          return;
+        }
+        const style = document.createElement('style');
+        style.textContent = `
+          /* Hide LIVE badge */
+          .live-badge, .live-indicator, [class*="live"] { display: none !important; }
+          /* Hide loading spinner that pushes bar right */
+          .spinner-layer, .spinner, [class*="spinner"],
+          .buffering-spinner, .loading-spinner { display: none !important; }
+          /* Center the metadata / controls overlay */
+          .player-controls-bottom, .controls-container,
+          .metadata-container, .progress-container {
+            left: 0 !important;
+            right: 0 !important;
+            width: 100% !important;
+            margin: 0 auto !important;
+            text-align: center !important;
+          }
+        `;
+        player.shadowRoot.appendChild(style);
+      }
+      setTimeout(patchShadowDOM, 1000);
     });
   </script>
 </body>

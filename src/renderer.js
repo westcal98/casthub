@@ -127,11 +127,21 @@ function showIdle() {
 function applyState(state) {
   if (disconnecting) return;
   castState = state;
-  if (!state || state.status === 'idle' || !state.connected) { showIdle(); return; }
-  isCasting = true;
-  showCasting(state);
+  if (!state || state.status === 'idle' || !state.connected) {
+    if (isCasting) showIdle();
+    return;
+  }
+  if (!isCasting) {
+    // Only run full showCasting on idle→casting transition
+    isCasting = true;
+    showCasting(state);
+  } else {
+    // Already casting — only update text that may have changed
+    if (state.title)      npTitle.textContent      = state.title;
+    if (state.deviceName) npDevice.textContent     = `Casting to ${state.deviceName}`;
+    if (state.deviceName) castBadgeLabel.textContent = `Casting · ${state.deviceName}`;
+  }
   btnPlayPause.textContent = state.status === 'playing' ? '⏸' : '▶';
-  if (state.status === 'paused') btnPlayPause.textContent = '▶';
   if (!seekDragging) { seekBar.max = state.duration || 100; seekBar.value = state.currentTime || 0; }
   timeCurrent.textContent = fmt(state.currentTime);
   timeTotal.textContent   = fmt(state.duration);
