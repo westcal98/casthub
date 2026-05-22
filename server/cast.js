@@ -168,6 +168,7 @@ class CastManager {
       if (this._statusInterval) { clearInterval(this._statusInterval); this._statusInterval = null; }
       this.player.load(media, { autoplay: true }, (err, status) => {
         if (err) return reject(err);
+        this.state.connected = true;
         this.state.status = 'playing';
         this.state.title  = title || this.state.title;
         this._applyStatus(status);
@@ -177,6 +178,23 @@ class CastManager {
           }
         }, 1000);
         resolve();
+      });
+    });
+  }
+
+  stopMedia() {
+    return new Promise(resolve => {
+      if (this._statusInterval) { clearInterval(this._statusInterval); this._statusInterval = null; }
+      const finish = () => {
+        this.state.status    = 'idle';
+        this.state.connected = false;
+        if (this._onStateChange) this._onStateChange({ ...this.state });
+        resolve();
+      };
+      if (!this.player) return finish();
+      this.player.stop(err => {
+        if (err) console.error('[CastHub] stopMedia error:', err.message);
+        finish();
       });
     });
   }

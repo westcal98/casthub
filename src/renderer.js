@@ -51,6 +51,9 @@ function renderQueue() {
       if (e.target.classList.contains('qi-remove')) removeFromQueue(+e.target.dataset.idx);
       else selectItem(+el.dataset.idx);
     });
+    el.addEventListener('dblclick', e => {
+      if (!e.target.classList.contains('qi-remove')) castItem(+el.dataset.idx);
+    });
     queueList.appendChild(el);
   });
 }
@@ -160,7 +163,7 @@ $('btn-stop').addEventListener('click', async () => {
   disconnecting = true;
   isCasting = false;
   showIdle();
-  await api.disconnect();
+  await api.softStop();
   disconnecting = false;
 });
 $('btn-fwd').addEventListener('click',   () => ctrl('seek', (castState?.currentTime||0) + 30));

@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('castHub', {
   castControl:  (p) => ipcRenderer.invoke('cast-control', p),
   getCastState:  ()  => ipcRenderer.invoke('get-cast-state'),
   disconnect:    ()  => ipcRenderer.invoke('disconnect'),
+  softStop:      ()  => ipcRenderer.invoke('soft-stop'),
   minimize: () => ipcRenderer.send('win-minimize'),
   maximize: () => ipcRenderer.send('win-maximize'),
   close:    () => ipcRenderer.send('win-close'),

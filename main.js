@@ -165,6 +165,17 @@ ipcMain.handle('load-queue', () => {
 ipcMain.handle('get-local-ip',   () => getLocalIP());
 ipcMain.handle('get-cast-state', () => castManager.getState());
 
+ipcMain.handle('soft-stop', async () => {
+  try {
+    stopLiveTimer();
+    currentFilePath   = null;
+    currentFileIsLive = false;
+    livePausedAt      = null;
+    await castManager.stopMedia();
+    return { success: true };
+  } catch(err) { return { success:false, error:err.message }; }
+});
+
 ipcMain.handle('disconnect', async () => {
   try {
     stopLiveTimer();
