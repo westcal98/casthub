@@ -233,8 +233,7 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       if (action === 'pause') {
         livePausedAt = getLiveTime();
         stopLiveTimer();
-        // Native pause: video freezes on TV instead of showing idle screen (BUFFERED type)
-        await castManager.control('pause');
+        await castManager.softStop();
         const ps = { ...castManager.getState(), status:'paused',
                      currentTime:livePausedAt, duration:liveDuration, connected:true };
         mainWindow?.webContents.send('cast-state', ps);
@@ -243,10 +242,11 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       }
 
       if (action === 'play') {
-        const resumeAt = livePausedAt ?? getLiveTime();
+        const resumeAt = livePausedAt !== null ? livePausedAt : getLiveTime();
         livePausedAt = null;
-        // Native resume: FFmpeg was blocked by back-pressure during pause, resumes in-place
-        await castManager.control('play');
+        const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(resumeAt)}`;
+        try { await castManager.reloadURL(url, st.title); }
+        catch { await castManager.castURL(st.deviceHost, url, st.title); }
         startLiveTimer(resumeAt, liveDuration);
         const ns = { ...castManager.getState(), currentTime:resumeAt, duration:liveDuration };
         broadcast({ type:'state', ...ns });

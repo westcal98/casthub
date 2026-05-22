@@ -49,7 +49,7 @@ class CastManager {
       const isHLS   = url.includes('/hls/') || url.endsWith('.m3u8');
       const isRemux = url.includes('/remux');
       const contentType = isHLS ? 'application/vnd.apple.mpegurl' : isRemux ? 'video/x-matroska' : 'video/mp4';
-      const streamType  = 'BUFFERED';
+      const streamType  = (isHLS || isRemux) ? 'LIVE' : 'BUFFERED';
 
       this.client = new Client();
       this.client.connect({ host: deviceHost, port: 8009 }, () => {
@@ -162,7 +162,7 @@ class CastManager {
       if (!this.player) return reject(new Error('No active player'));
       const isRemux     = url.includes('/remux');
       const contentType = isRemux ? 'video/x-matroska' : 'video/mp4';
-      const streamType  = 'BUFFERED';
+      const streamType  = isRemux ? 'LIVE' : 'BUFFERED';
       const media = { contentId: url, contentType, streamType,
                       metadata: { type:0, metadataType:0, title: title || this.state.title },
                       ...(duration > 0 && { duration }) };
