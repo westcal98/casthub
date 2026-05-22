@@ -3,12 +3,14 @@ const fs        = require('fs');
 const path      = require('path');
 const os        = require('os');
 const { spawn } = require('child_process');
+const crypto       = require('crypto');
 
 let ffmpegPath;
 try { ffmpegPath = require('ffmpeg-static'); } catch {}
 
-const TRANSCODE_EXTS = new Set(['mkv','avi','ts','wmv','flv']);
-const sessions = new Map();
+const TRANSCODE_EXTS  = new Set(['mkv','avi','ts','wmv','flv']);
+const sessions        = new Map();
+const segmentSessions = new Map(); // sessionId → { filePath, seekOffset, tempDir, ffmpegProcess, done }
 
 const app = express();
 let server;
@@ -39,6 +41,138 @@ function getStreamInfo(filePath) {
     });
   });
 }
+
+// ── Segmented MKV session system ──────────────────────────────────
+function waitForSegmentReady(session, index) {
+  return new Promise((resolve, reject) => {
+    const segPath  = path.join(session.tempDir, `segment${index}.mkv`);
+    const nextPath = path.join(session.tempDir, `segment${index + 1}.mkv`);
+    const deadline = Date.now() + 30000;
+    (function check() {
+      try {
+        if (fs.existsSync(segPath) && fs.statSync(segPath).size > 0) {
+          if (session.done || fs.existsSync(nextPath)) return resolve(segPath);
+        } else if (session.done) {
+          return reject(new Error('No more segments'));
+        }
+      } catch {}
+      if (Date.now() > deadline) return reject(new Error('Timeout waiting for segment'));
+      setTimeout(check, 150);
+    })();
+  });
+}
+
+function startSegmentSession(filePath, seekOffset) {
+  return new Promise((resolve, reject) => {
+    if (!ffmpegPath) return reject(new Error('ffmpeg not available'));
+
+    // Kill any existing session for this file
+    for (const [id, s] of segmentSessions) {
+      if (s.filePath === filePath) {
+        try { s.ffmpegProcess.kill('SIGKILL'); } catch {}
+        segmentSessions.delete(id);
+        setTimeout(() => { try { fs.rmSync(s.tempDir, { recursive: true, force: true }); } catch {} }, 2000);
+      }
+    }
+
+    const sessionId = crypto.randomUUID();
+    const tempDir   = path.join(os.tmpdir(), 'casthub-segments', sessionId);
+    fs.mkdirSync(tempDir, { recursive: true });
+
+    const proc = spawn(ffmpegPath, [
+      '-hide_banner', '-loglevel', 'error',
+      '-ss', String(seekOffset || 0),
+      '-i', filePath,
+      '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-b:a', '256k', '-sn',
+      '-f', 'segment', '-segment_format', 'matroska',
+      '-segment_time', '10', '-segment_start_number', '0',
+      path.join(tempDir, 'segment%d.mkv')
+    ]);
+
+    const session = { filePath, seekOffset: seekOffset || 0, tempDir, ffmpegProcess: proc, done: false };
+    segmentSessions.set(sessionId, session);
+    proc.stderr.on('data', d => { const s = d.toString().trim(); if (s) console.error('[segment]', s); });
+    proc.on('close', code => {
+      session.done = true;
+      console.log(`[CastHub] Segment session ${sessionId} ended (exit ${code})`);
+    });
+
+    // Wait until segment0 is finalized (segment1 appears) or proc ends (short file)
+    const deadline = Date.now() + 30000;
+    (function waitForReady() {
+      const seg0 = path.join(tempDir, 'segment0.mkv');
+      const seg1 = path.join(tempDir, 'segment1.mkv');
+      try {
+        if (fs.existsSync(seg0) && fs.statSync(seg0).size > 0 && (fs.existsSync(seg1) || session.done))
+          return resolve({ sessionId, firstSegmentUrl: `http://${getLocalIP()}:8765/segment/${sessionId}/0` });
+      } catch {}
+      if (Date.now() > deadline) return reject(new Error('Timeout: segments not ready'));
+      setTimeout(waitForReady, 200);
+    })();
+  });
+}
+
+function stopSegmentSession(sessionId) {
+  const s = segmentSessions.get(sessionId);
+  if (!s) return;
+  try { s.ffmpegProcess.kill('SIGKILL'); } catch {}
+  segmentSessions.delete(sessionId);
+  setTimeout(() => { try { fs.rmSync(s.tempDir, { recursive: true, force: true }); } catch {} }, 2000);
+  console.log(`[CastHub] Segment session stopped: ${sessionId}`);
+}
+
+function stopAllSegmentSessions() {
+  for (const id of [...segmentSessions.keys()]) stopSegmentSession(id);
+}
+
+// ── Segmented MKV routes ───────────────────────────────────────────
+app.post('/session/start', express.json(), async (req, res) => {
+  const { filePath, seekOffset } = req.body || {};
+  if (!filePath || !fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+  try {
+    const result = await startSegmentSession(filePath, seekOffset || 0);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/segment/:sessionId/:index', async (req, res) => {
+  const session = segmentSessions.get(req.params.sessionId);
+  if (!session) return res.status(404).send('Session not found');
+  const index = parseInt(req.params.index, 10);
+  if (isNaN(index)) return res.status(400).send('Invalid segment index');
+
+  let segPath;
+  try {
+    segPath = await waitForSegmentReady(session, index);
+  } catch (e) {
+    return res.status(404).send(e.message);
+  }
+
+  const fileSize = fs.statSync(segPath).size;
+  const range    = req.headers.range;
+
+  if (range) {
+    const [s, e] = range.replace(/bytes=/, '').split('-');
+    const start  = parseInt(s, 10);
+    const end    = e ? parseInt(e, 10) : fileSize - 1;
+    res.writeHead(206, {
+      'Content-Range':  `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges':  'bytes',
+      'Content-Length': end - start + 1,
+      'Content-Type':   'video/x-matroska'
+    });
+    fs.createReadStream(segPath, { start, end }).pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Accept-Ranges':  'bytes',
+      'Content-Type':   'video/x-matroska'
+    });
+    fs.createReadStream(segPath).pipe(res);
+  }
+});
 
 // Remux: video passthrough, stereo AAC audio, subtitles stripped
 app.get('/remux', (req, res) => {
@@ -292,4 +426,4 @@ function startFileServer() {
 }
 function stopFileServer() { return new Promise(resolve => server?.close(resolve)); }
 
-module.exports = { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, generateSession, stopSession, TRANSCODE_EXTS };
+module.exports = { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, generateSession, stopSession, TRANSCODE_EXTS, startSegmentSession, stopSegmentSession, stopAllSegmentSessions };

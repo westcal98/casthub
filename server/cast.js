@@ -46,9 +46,10 @@ class CastManager {
       if (this.client) { try { this.client.close(); } catch {} this.client = null; this.player = null; }
       if (!deviceHost) return reject(new Error('No device selected'));
 
-      const isHLS   = url.includes('/hls/') || url.endsWith('.m3u8');
-      const isRemux = url.includes('/remux');
-      const contentType = isHLS ? 'application/vnd.apple.mpegurl' : isRemux ? 'video/x-matroska' : 'video/mp4';
+      const isHLS     = url.includes('/hls/') || url.endsWith('.m3u8');
+      const isRemux   = url.includes('/remux');
+      const isSegment = url.includes('/segment/');
+      const contentType = isHLS ? 'application/vnd.apple.mpegurl' : (isRemux || isSegment) ? 'video/x-matroska' : 'video/mp4';
       const streamType  = (isHLS || isRemux) ? 'LIVE' : 'BUFFERED';
 
       this.client = new Client();
@@ -77,7 +78,7 @@ class CastManager {
               if (this.player && this.state.status === 'playing') {
                 this.player.getStatus((err, s) => { if (s && !err) this._applyStatus(s); });
               }
-            }, 1000);
+            }, 5000);
             resolve();
           });
         });
@@ -91,6 +92,10 @@ class CastManager {
     if (s.playerState)         this.state.status      = s.playerState.toLowerCase();
     if (s.currentTime != null) this.state.currentTime = s.currentTime;
     if (s.media?.duration)     this.state.duration    = s.media.duration;
+    if (s.media) {
+      const m = (s.media.contentId || '').match(/\/segment\/[^/]+\/(\d+)$/);
+      this.state.segmentIndex = m ? parseInt(m[1], 10) : null;
+    }
     if (s.volume) {
       if (s.volume.level != null) this.state.volume = s.volume.level;
       if (s.volume.muted  != null) this.state.muted  = s.volume.muted;
@@ -161,7 +166,8 @@ class CastManager {
     return new Promise((resolve, reject) => {
       if (!this.player) return reject(new Error('No active player'));
       const isRemux     = url.includes('/remux');
-      const contentType = isRemux ? 'video/x-matroska' : 'video/mp4';
+      const isSegment   = url.includes('/segment/');
+      const contentType = (isRemux || isSegment) ? 'video/x-matroska' : 'video/mp4';
       const streamType  = isRemux ? 'LIVE' : 'BUFFERED';
       const media = { contentId: url, contentType, streamType,
                       metadata: { type:0, metadataType:0, title: title || this.state.title },
@@ -177,7 +183,7 @@ class CastManager {
           if (this.player && this.state.status === 'playing') {
             this.player.getStatus((err, s) => { if (s && !err) this._applyStatus(s); });
           }
-        }, 1000);
+        }, 5000);
         resolve();
       });
     });

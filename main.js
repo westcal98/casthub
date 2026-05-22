@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs   = require('fs');
-const { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, TRANSCODE_EXTS } = require('./server/fileServer');
+const { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, TRANSCODE_EXTS, startSegmentSession, stopSegmentSession, stopAllSegmentSessions } = require('./server/fileServer');
 const { startWSServer, stopWSServer, broadcast, onMobileCommand, onBrowseRequest, setStateGetter } = require('./server/wsServer');
 const CastManager = require('./server/cast');
 
@@ -15,8 +15,13 @@ const castManager = new CastManager();
 
 // Broadcast state to renderer + mobile whenever cast state changes
 castManager._onStateChange = (state) => {
-  // For LIVE streams: Chromecast always reports currentTime:0 — use local timer instead
-  if (currentFileIsLive) {
+  if (currentSessionId && state.segmentIndex != null) {
+    // Segmented sessions: adjust currentTime by segment offset so the UI shows absolute position
+    state = { ...state,
+      currentTime: currentSeekOffset + state.segmentIndex * 10 + state.currentTime,
+      duration:    liveDuration || state.duration };
+  } else if (currentFileIsLive) {
+    // LIVE remux: Chromecast reports currentTime:0 — use local timer instead
     if (livePausedAt !== null) {
       state = { ...state, status:'paused', currentTime:livePausedAt,
                 duration:liveDuration || state.duration, connected:true };
@@ -30,7 +35,9 @@ castManager._onStateChange = (state) => {
 };
 let currentFilePath   = null;
 let currentFileIsLive = false;
-let lastDeviceHost    = null;  // persists after disconnect for before-quit
+let currentSessionId  = null;   // active segmented MKV session
+let currentSeekOffset = 0;      // seek position the current session started from
+let lastDeviceHost    = null;   // persists after disconnect for before-quit
 
 // ── Live stream time tracking ──────────────────────────────────────
 let liveTimer     = null;
@@ -94,7 +101,7 @@ app.whenReady().then(async () => {
       if (cmd.action === 'cast') {
         const url = await buildCastURL(cmd.filePath, 0);
         await castManager.castURL(castManager.getState().deviceHost, url, path.basename(cmd.filePath));
-      } else if (cmd.action === 'seek' && currentFileIsLive) {
+      } else if (cmd.action === 'seek' && (currentFileIsLive || currentSessionId)) {
         await handleTSSeek(cmd.value);
       } else {
         await castManager.control(cmd.action, cmd.value);
@@ -114,26 +121,40 @@ async function buildCastURL(filePath, seekSeconds) {
   if (TRANSCODE_EXTS.has(ext)) {
     const { hasEAC3, hasSSA, duration } = await getStreamInfo(filePath);
     if (hasEAC3 || hasSSA) {
-      console.log(`[CastHub] Needs remux — EAC3: ${hasEAC3}, SSA: ${hasSSA}`);
-      currentFileIsLive = true;
-      startLiveTimer(seek, duration);
-      return `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(filePath)}&seek=${seek}`;
+      console.log(`[CastHub] Needs segmented remux — EAC3: ${hasEAC3}, SSA: ${hasSSA}`);
+      const { sessionId, firstSegmentUrl } = await startSegmentSession(filePath, seek);
+      currentSessionId  = sessionId;
+      currentSeekOffset = seek;
+      currentFileIsLive = false;
+      if (duration) liveDuration = duration;
+      return firstSegmentUrl;
     }
   }
   currentFileIsLive = false;
+  currentSessionId  = null;
+  currentSeekOffset = 0;
   return `http://${getLocalIP()}:8765/transcode?path=${encodeURIComponent(filePath)}`;
 }
 
 async function handleTSSeek(seconds) {
   if (!currentFilePath) return;
-  const endpoint = currentFileIsLive ? 'remux' : 'transcode';
-  const url = `http://${getLocalIP()}:8765/${endpoint}?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(seconds)}`;
-  const state = castManager.getState();
-  await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration });
-  if (currentFileIsLive) startLiveTimer(seconds, liveDuration);
+  const state   = castManager.getState();
+  const seekTo  = Math.floor(seconds);
+  if (currentSessionId) {
+    const { sessionId, firstSegmentUrl } = await startSegmentSession(currentFilePath, seekTo);
+    currentSessionId  = sessionId;
+    currentSeekOffset = seekTo;
+    try { await castManager.reloadURL(firstSegmentUrl, state.title, { duration: liveDuration }); }
+    catch { await castManager.castURL(state.deviceHost, firstSegmentUrl, state.title, { duration: liveDuration }); }
+  } else {
+    const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${seekTo}`;
+    await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration });
+    if (currentFileIsLive) startLiveTimer(seconds, liveDuration);
+  }
 }
 
 app.on('before-quit', (e) => {
+  stopAllSegmentSessions();
   // Dismiss receiver if we ever connected — even if user already clicked Stop
   if (!lastDeviceHost && !castManager.getState().connected) {
     stopFileServer(); stopWSServer();
@@ -168,8 +189,10 @@ ipcMain.handle('get-cast-state', () => castManager.getState());
 ipcMain.handle('soft-stop', async () => {
   try {
     stopLiveTimer();
+    if (currentSessionId) { stopSegmentSession(currentSessionId); currentSessionId = null; }
     currentFilePath   = null;
     currentFileIsLive = false;
+    currentSeekOffset = 0;
     livePausedAt      = null;
     await castManager.stopMedia();
     return { success: true };
@@ -179,8 +202,10 @@ ipcMain.handle('soft-stop', async () => {
 ipcMain.handle('disconnect', async () => {
   try {
     stopLiveTimer();
-    currentFilePath  = null;
+    if (currentSessionId) { stopSegmentSession(currentSessionId); currentSessionId = null; }
+    currentFilePath   = null;
     currentFileIsLive = false;
+    currentSeekOffset = 0;
     await castManager.disconnect();
     lastDeviceHost = null;
     const state = castManager.getState();
@@ -226,6 +251,21 @@ ipcMain.handle('cast-file', async (_, { filePath, deviceHost }) => {
 
 ipcMain.handle('cast-control', async (_, { action, value }) => {
   try {
+    // ── Segmented session seek ─────────────────────────────────────
+    if (currentSessionId && currentFilePath && action === 'seek') {
+      const seekTo = Math.floor(value);
+      const st     = castManager.getState();
+      const { sessionId, firstSegmentUrl } = await startSegmentSession(currentFilePath, seekTo);
+      currentSessionId  = sessionId;
+      currentSeekOffset = seekTo;
+      try { await castManager.reloadURL(firstSegmentUrl, st.title, { duration: liveDuration }); }
+      catch { await castManager.castURL(st.deviceHost, firstSegmentUrl, st.title, { duration: liveDuration }); }
+      const ns = { ...castManager.getState() };
+      broadcast({ type:'state', ...ns });
+      mainWindow?.webContents.send('cast-state', ns);
+      return { success: true };
+    }
+
     if (currentFileIsLive && currentFilePath) {
       const st = castManager.getState();
 
@@ -266,7 +306,10 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
         return { success: true };
       }
     }
-    if (action === 'stop') { currentFilePath = null; currentFileIsLive = false; stopLiveTimer(); }
+    if (action === 'stop') {
+      if (currentSessionId) { stopSegmentSession(currentSessionId); currentSessionId = null; }
+      currentFilePath = null; currentFileIsLive = false; currentSeekOffset = 0; stopLiveTimer();
+    }
     await castManager.control(action, value);
     const state = castManager.getState();
     broadcast({ type:'state', ...state });
