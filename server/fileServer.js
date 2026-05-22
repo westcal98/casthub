@@ -43,25 +43,6 @@ function getStreamInfo(filePath) {
 }
 
 // ── Segmented MKV session system ──────────────────────────────────
-function waitForSegmentReady(session, index) {
-  return new Promise((resolve, reject) => {
-    const segPath  = path.join(session.tempDir, `segment${index}.mkv`);
-    const nextPath = path.join(session.tempDir, `segment${index + 1}.mkv`);
-    const deadline = Date.now() + 30000;
-    (function check() {
-      try {
-        if (fs.existsSync(segPath) && fs.statSync(segPath).size > 0) {
-          if (session.done || fs.existsSync(nextPath)) return resolve(segPath);
-        } else if (session.done) {
-          return reject(new Error('No more segments'));
-        }
-      } catch {}
-      if (Date.now() > deadline) return reject(new Error('Timeout waiting for segment'));
-      setTimeout(check, 150);
-    })();
-  });
-}
-
 function startSegmentSession(filePath, seekOffset) {
   return new Promise((resolve, reject) => {
     if (!ffmpegPath) return reject(new Error('ffmpeg not available'));
@@ -97,17 +78,16 @@ function startSegmentSession(filePath, seekOffset) {
       console.log(`[CastHub] Segment session ${sessionId} ended (exit ${code})`);
     });
 
-    // Wait until segment0 is finalized (segment1 appears) or proc ends (short file)
-    const deadline = Date.now() + 30000;
+    // Return as soon as segment0 starts being written — don't wait for finalization
+    const deadline = Date.now() + 10000;
     (function waitForReady() {
       const seg0 = path.join(tempDir, 'segment0.mkv');
-      const seg1 = path.join(tempDir, 'segment1.mkv');
       try {
-        if (fs.existsSync(seg0) && fs.statSync(seg0).size > 0 && (fs.existsSync(seg1) || session.done))
+        if (fs.existsSync(seg0))
           return resolve({ sessionId, firstSegmentUrl: `http://${getLocalIP()}:8765/segment/${sessionId}/0` });
       } catch {}
-      if (Date.now() > deadline) return reject(new Error('Timeout: segments not ready'));
-      setTimeout(waitForReady, 200);
+      if (Date.now() > deadline) return reject(new Error('Timeout: ffmpeg did not produce output'));
+      setTimeout(waitForReady, 50);
     })();
   });
 }
@@ -143,35 +123,59 @@ app.get('/segment/:sessionId/:index', async (req, res) => {
   const index = parseInt(req.params.index, 10);
   if (isNaN(index)) return res.status(400).send('Invalid segment index');
 
-  let segPath;
-  try {
-    segPath = await waitForSegmentReady(session, index);
-  } catch (e) {
-    return res.status(404).send(e.message);
+  const segPath  = path.join(session.tempDir, `segment${index}.mkv`);
+  const nextPath = path.join(session.tempDir, `segment${index + 1}.mkv`);
+
+  // Wait for this segment to start being written
+  const deadline = Date.now() + 20000;
+  while (!fs.existsSync(segPath)) {
+    if (session.done) return res.status(404).send('No more segments');
+    if (Date.now() > deadline) return res.status(404).send('Timeout waiting for segment');
+    await new Promise(r => setTimeout(r, 50));
   }
 
-  const fileSize = fs.statSync(segPath).size;
-  const range    = req.headers.range;
+  // Stream bytes live as ffmpeg writes them; end response when segment is finalized
+  res.setHeader('Content-Type', 'video/x-matroska');
+  res.setHeader('Accept-Ranges', 'bytes');
 
-  if (range) {
-    const [s, e] = range.replace(/bytes=/, '').split('-');
-    const start  = parseInt(s, 10);
-    const end    = e ? parseInt(e, 10) : fileSize - 1;
-    res.writeHead(206, {
-      'Content-Range':  `bytes ${start}-${end}/${fileSize}`,
-      'Accept-Ranges':  'bytes',
-      'Content-Length': end - start + 1,
-      'Content-Type':   'video/x-matroska'
-    });
-    fs.createReadStream(segPath, { start, end }).pipe(res);
-  } else {
-    res.writeHead(200, {
-      'Content-Length': fileSize,
-      'Accept-Ranges':  'bytes',
-      'Content-Type':   'video/x-matroska'
-    });
-    fs.createReadStream(segPath).pipe(res);
+  let offset = 0;
+  let closed = false;
+  req.on('close', () => { closed = true; });
+
+  while (!closed) {
+    try {
+      const size = fs.statSync(segPath).size;
+      if (size > offset) {
+        const len = size - offset;
+        const buf = Buffer.allocUnsafe(len);
+        const fd  = fs.openSync(segPath, 'r');
+        fs.readSync(fd, buf, 0, len, offset);
+        fs.closeSync(fd);
+        offset += len;
+        const ok = res.write(buf);
+        if (!ok) await new Promise(r => res.once('drain', r));
+      }
+      // Segment is finalized when next segment file appears or ffmpeg exits
+      if (session.done || fs.existsSync(nextPath)) {
+        // One final read for any bytes written in the last polling gap
+        try {
+          const finalSize = fs.statSync(segPath).size;
+          if (finalSize > offset) {
+            const len = finalSize - offset;
+            const buf = Buffer.allocUnsafe(len);
+            const fd  = fs.openSync(segPath, 'r');
+            fs.readSync(fd, buf, 0, len, offset);
+            fs.closeSync(fd);
+            res.write(buf);
+          }
+        } catch {}
+        break;
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 50));
   }
+
+  res.end();
 });
 
 // Remux: video passthrough, stereo AAC audio, subtitles stripped
