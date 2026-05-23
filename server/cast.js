@@ -33,7 +33,8 @@ class CastManager {
     const browser = bonjour.find({ type: 'googlecast' });
     browser.on('up', svc => {
       if (this.devices.find(d => d.host === svc.host)) return;
-      this.devices.push({ name: svc.txt?.fn || svc.name, host: svc.host, port: svc.port || 8009 });
+      const ip = svc.addresses?.find(a => /^\d+\.\d+\.\d+\.\d+$/.test(a)) || null;
+      this.devices.push({ name: svc.txt?.fn || svc.name, host: svc.host, ip, port: svc.port || 8009 });
       console.log(`[CastHub] Device found: ${svc.txt?.fn || svc.name} @ ${svc.host}`);
       saveCachedDevices(this.devices);
       onUpdate([...this.devices]);

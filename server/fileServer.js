@@ -7,6 +7,36 @@ const crypto       = require('crypto');
 
 let ffmpegPath;
 try { ffmpegPath = require('ffmpeg-static'); } catch {}
+// WSL: ffmpeg-static resolves to 'ffmpeg' but the installed binary is 'ffmpeg.exe' (Windows build)
+if (ffmpegPath && !fs.existsSync(ffmpegPath) && fs.existsSync(ffmpegPath + '.exe')) {
+  ffmpegPath = ffmpegPath + '.exe';
+}
+
+// Only applies WSL-specific path conversions — on Windows the paths are already correct
+const IS_WSL = (() => { try { return fs.readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft'); } catch { return false; } })();
+
+// In WSL, /mnt/c/foo must become C:\foo for the Windows ffmpeg.exe binary
+function toFfmpegPath(p) {
+  if (!IS_WSL || !ffmpegPath || !ffmpegPath.endsWith('.exe')) return p;
+  return p.replace(/^\/mnt\/([a-z])\//, (_, d) => `${d.toUpperCase()}:\\`).replace(/\//g, '\\');
+}
+
+// Return a temp dir writable by ffmpeg and readable by Node in this process.
+// In WSL + ffmpeg.exe: /tmp is Linux-only; use a path under C:\ accessible as /mnt/c/
+let _sessionTempBase = null;
+function getSessionTempBase() {
+  if (_sessionTempBase) return _sessionTempBase;
+  if (!IS_WSL || !ffmpegPath || !ffmpegPath.endsWith('.exe')) return _sessionTempBase = os.tmpdir();
+  try {
+    const { execSync } = require('child_process');
+    const winTemp = execSync('cmd.exe /c echo %TEMP%', { encoding: 'utf8' }).trim();
+    // Convert C:\Users\... → /mnt/c/Users/... so Node (WSL) can read the files
+    _sessionTempBase = winTemp.replace(/^([A-Za-z]):\\/, (_, d) => `/mnt/${d.toLowerCase()}/`).replace(/\\/g, '/');
+  } catch {
+    _sessionTempBase = os.tmpdir();
+  }
+  return _sessionTempBase;
+}
 
 const TRANSCODE_EXTS  = new Set(['mkv','avi','ts','wmv','flv']);
 const sessions        = new Map();
@@ -23,7 +53,7 @@ const { execFile } = require('child_process');
 function getStreamInfo(filePath) {
   return new Promise(resolve => {
     if (!ffmpegPath) return resolve({ hasEAC3: false, hasSSA: false, duration: 0 });
-    execFile(ffmpegPath, ['-hide_banner', '-i', filePath], (_err, stdout, stderr) => {
+    execFile(ffmpegPath, ['-hide_banner', '-i', toFfmpegPath(filePath)], (_err, stdout, stderr) => {
       // On Windows/Electron, ffmpeg exits code 1 (no output file) so output
       // may be in _err.stderr rather than the stderr parameter — check both
       const info = (_err?.stderr || '') + (stderr || '') + (_err?.stdout || '') + (stdout || '');
@@ -57,17 +87,17 @@ function startSegmentSession(filePath, seekOffset) {
     }
 
     const sessionId = crypto.randomUUID();
-    const tempDir   = path.join(os.tmpdir(), 'casthub-segments', sessionId);
+    const tempDir   = path.join(getSessionTempBase(), 'casthub-segments', sessionId);
     fs.mkdirSync(tempDir, { recursive: true });
 
     const proc = spawn(ffmpegPath, [
       '-hide_banner', '-loglevel', 'error',
       '-ss', String(seekOffset || 0),
-      '-i', filePath,
+      '-i', toFfmpegPath(filePath),
       '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-b:a', '256k', '-sn',
       '-f', 'segment', '-segment_format', 'matroska',
       '-segment_time', '10', '-segment_start_number', '0',
-      path.join(tempDir, 'segment%d.mkv')
+      toFfmpegPath(path.join(tempDir, 'segment%d.mkv'))
     ]);
 
     const session = { filePath, seekOffset: seekOffset || 0, tempDir, ffmpegProcess: proc, done: false };
@@ -195,7 +225,7 @@ app.get('/remux', (req, res) => {
     '-hide_banner', '-loglevel', 'error',
     '-probesize', '1M', '-analyzeduration', '100000',
     '-ss', String(seekSeconds),
-    '-i', filePath,
+    '-i', toFfmpegPath(filePath),
     '-map', '0:v:0', '-map', '0:a:0',
     '-c:v', 'copy',
     '-c:a', 'aac', '-b:a', '256k', '-ac', '2',
@@ -266,20 +296,20 @@ function waitForFile(filePath, timeoutMs) {
 
 function generateSession(filePath, seekSeconds) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const dir = path.join(os.tmpdir(), `ch_${id}`);
+  const dir = path.join(getSessionTempBase(), `ch_${id}`);
   fs.mkdirSync(dir, { recursive: true });
 
   const proc = spawn(ffmpegPath, [
     '-hide_banner', '-loglevel', 'warning',
     '-ss', String(seekSeconds || 0),
-    '-i', filePath,
+    '-i', toFfmpegPath(filePath),
     '-map', '0:v:0', '-map', '0:a:0',
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '256k',
     '-hls_time', '6', '-hls_list_size', '5',
     '-hls_flags', 'delete_segments',
-    '-hls_segment_filename', path.join(dir, 'seg%05d.ts'),
-    path.join(dir, 'playlist.m3u8')
+    '-hls_segment_filename', toFfmpegPath(path.join(dir, 'seg%05d.ts')),
+    toFfmpegPath(path.join(dir, 'playlist.m3u8'))
   ]);
 
   const session = { proc, dir, lastPlaylist: null, done: false };

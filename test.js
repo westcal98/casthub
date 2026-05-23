@@ -24,11 +24,20 @@ const CastManager = require('./server/cast');
 
 // Try both WSL and Windows paths for the test file
 const FILE_CANDIDATES = [
-  "/mnt/c/Users/westc/CrossDevice/Frank's Sigma Ultra (5)/storage/Download/Quick Share/Sisu.Road.to.Revenge.2025.1080p.WEBRip.10Bit.DDP5.1.x265-NeoNoir.mkv",
-  "C:\\Users\\westc\\CrossDevice\\Frank's Sigma Ultra (5)\\storage\\Download\\Quick Share\\Sisu.Road.to.Revenge.2025.1080p.WEBRip.10Bit.DDP5.1.x265-NeoNoir.mkv",
+  "/mnt/c/Plex/Movies/28.Years.Later.The.Bone.Temple.2026.1080p.WEBRip.10Bit.DDP.5.1.x265-NeoNoir.mkv",
+  "C:\\Plex\\Movies\\28.Years.Later.The.Bone.Temple.2026.1080p.WEBRip.10Bit.DDP.5.1.x265-NeoNoir.mkv",
 ];
 
-const DEVICE_CACHE = path.join(os.homedir(), '.casthub_devices.json');
+// Electron writes the cache to the Windows home dir; node in WSL has a different homedir
+const DEVICE_CACHE_CANDIDATES = [
+  path.join(os.homedir(), '.casthub_devices.json'),
+  '/mnt/c/Users/westc/.casthub_devices.json',
+];
+
+// WSL2 can't reach the LAN — detect so cast tests can be skipped gracefully
+const IS_WSL = (() => {
+  try { return fs.readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft'); } catch { return false; }
+})();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -107,10 +116,12 @@ async function main() {
 
     // ── 4. Resolve Chromecast ─────────────────────────────────────────────
     await test('Chromecast device found in cache', () => {
-      const raw = fs.readFileSync(DEVICE_CACHE, 'utf8');
-      const devices = JSON.parse(raw);
+      const cachePath = DEVICE_CACHE_CANDIDATES.find(p => { try { return fs.existsSync(p); } catch { return false; } });
+      if (!cachePath) throw new Error(`Device cache not found — open the app once to populate it`);
+      const devices = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
       if (!devices.length) throw new Error('No devices in cache — open the app once to populate it');
-      deviceHost = devices[0].host;
+      // Prefer IP over mDNS hostname — .local hostnames don't resolve in WSL
+      deviceHost = devices[0].ip || devices[0].host;
       console.log(`[TEST]    ${devices[0].name}  (${deviceHost})`);
     });
 
@@ -121,6 +132,11 @@ async function main() {
       masterUrl = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
       console.log(`[TEST]    ${masterUrl}`);
     });
+
+    if (IS_WSL) {
+      console.log('[TEST] ⚠  WSL detected — skipping Chromecast network tests (LAN not reachable from WSL2)');
+      console.log('[TEST]    Run on Windows host for full cast coverage.');
+    } else {
 
     // ── 6. Connect + cast ─────────────────────────────────────────────────
     await test('castURL: connect to Chromecast + load media', async () => {
@@ -180,6 +196,8 @@ async function main() {
       if (sessionId) { stopSession(sessionId); sessionId = null; }
       await cm.disconnect();
     });
+
+    } // end !IS_WSL
 
   } catch {
     // test() already logged the failure; proceed to cleanup + summary
