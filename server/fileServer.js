@@ -185,23 +185,25 @@ app.get('/segment/:sessionId/:index', async (req, res) => {
         const ok = res.write(buf);
         if (!ok) await new Promise(r => res.once('drain', r));
       }
-      // Segment is finalized when next segment file appears or ffmpeg exits
-      if (session.done || fs.existsSync(nextPath)) {
-        // One final read for any bytes written in the last polling gap
-        try {
-          const finalSize = fs.statSync(segPath).size;
-          if (finalSize > offset) {
-            const len = finalSize - offset;
-            const buf = Buffer.allocUnsafe(len);
-            const fd  = fs.openSync(segPath, 'r');
-            fs.readSync(fd, buf, 0, len, offset);
-            fs.closeSync(fd);
-            res.write(buf);
-          }
-        } catch {}
-        break;
-      }
-    } catch {}
+    } catch {
+      break;
+    }
+    // Segment is finalized when next segment file appears or ffmpeg exits
+    if (session.done || fs.existsSync(nextPath)) {
+      // One final read for any bytes written in the last polling gap
+      try {
+        const finalSize = fs.statSync(segPath).size;
+        if (finalSize > offset) {
+          const len = finalSize - offset;
+          const buf = Buffer.allocUnsafe(len);
+          const fd  = fs.openSync(segPath, 'r');
+          fs.readSync(fd, buf, 0, len, offset);
+          fs.closeSync(fd);
+          res.write(buf);
+        }
+      } catch {}
+      break;
+    }
     await new Promise(r => setTimeout(r, 50));
   }
 
@@ -435,22 +437,25 @@ app.get('/hls/:id/:seg', async (req, res) => {
         const ok = res.write(buf);
         if (!ok) await new Promise(r => res.once('drain', r));
       }
-      if (s.done || fs.existsSync(nextPath)) {
-        // Final drain: read any bytes written in the last polling gap
-        try {
-          const final = fs.statSync(segPath).size;
-          if (final > offset) {
-            const len = final - offset;
-            const buf = Buffer.allocUnsafe(len);
-            const fd  = fs.openSync(segPath, 'r');
-            fs.readSync(fd, buf, 0, len, offset);
-            fs.closeSync(fd);
-            res.write(buf);
-          }
-        } catch {}
-        break;
-      }
-    } catch {}
+    } catch {
+      // File disappeared (e.g. delete_segments removed it) — end the response cleanly
+      break;
+    }
+    if (s.done || fs.existsSync(nextPath)) {
+      // Final drain: read any bytes written in the last polling gap
+      try {
+        const final = fs.statSync(segPath).size;
+        if (final > offset) {
+          const len = final - offset;
+          const buf = Buffer.allocUnsafe(len);
+          const fd  = fs.openSync(segPath, 'r');
+          fs.readSync(fd, buf, 0, len, offset);
+          fs.closeSync(fd);
+          res.write(buf);
+        }
+      } catch {}
+      break;
+    }
     await new Promise(r => setTimeout(r, 50));
   }
   res.end();
