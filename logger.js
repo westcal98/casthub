@@ -40,3 +40,4 @@ console.error = (...args) => { write('ERR',   args); _error(...args); };
 console.warn  = (...args) => { write('WARN',  args); _warn(...args);  };
 
 console.log(`[CastHub] Logging to ${logPath}`);
+module.exports = { logPath };
