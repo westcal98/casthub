@@ -186,7 +186,8 @@ app.get('/segment/:sessionId/:index', async (req, res) => {
         if (!ok) await new Promise(r => res.once('drain', r));
       }
     } catch {
-      break;
+      // Transient read error (e.g. Windows file lock) — retry unless file is gone
+      if (!fs.existsSync(segPath)) break;
     }
     // Segment is finalized when next segment file appears or ffmpeg exits
     if (session.done || fs.existsSync(nextPath)) {
@@ -336,6 +337,7 @@ function stopSession(id) {
 app.get('/hls/:id/master.m3u8', (req, res) => {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).send('Session not found');
+  console.log(`[HLS] master.m3u8 → ${req.params.id}`);
   // Declare codecs explicitly so Chromecast knows it can play HEVC + AAC
   const master = [
     '#EXTM3U',
@@ -370,17 +372,22 @@ app.get('/hls/:id/playlist.m3u8', async (req, res) => {
           return (t && !t.startsWith('#')) ? path.basename(t) : line;
         }).join('\n');
         s.lastPlaylist = content;
+        console.log(`[HLS] playlist.m3u8 → real (${segLines.length} segs)`);
         return res.send(content);
       }
     } catch {}
 
     // 2. Mid-write: serve cached version so Chromecast doesn't get truncated content
-    if (s.lastPlaylist) return res.send(s.lastPlaylist);
+    if (s.lastPlaylist) {
+      console.log('[HLS] playlist.m3u8 → cached');
+      return res.send(s.lastPlaylist);
+    }
 
     // 3. seg00000.ts has started — synthesise a one-entry playlist so Chromecast
     //    can begin fetching and buffering it before the segment is fully encoded
     try {
       if (fs.existsSync(seg0) && fs.statSync(seg0).size > 0) {
+        console.log(`[HLS] playlist.m3u8 → synthesised (seg0 ${fs.statSync(seg0).size}B)`);
         return res.send([
           '#EXTM3U',
           '#EXT-X-VERSION:3',
@@ -395,6 +402,7 @@ app.get('/hls/:id/playlist.m3u8', async (req, res) => {
     await new Promise(r => setTimeout(r, 150));
   }
 
+  console.log('[HLS] playlist.m3u8 → 504 timeout');
   res.status(504).send('Timeout waiting for playlist');
 });
 
@@ -410,10 +418,11 @@ app.get('/hls/:id/:seg', async (req, res) => {
   // Wait for the segment file to start being written
   const deadline = Date.now() + 20000;
   while (!(fs.existsSync(segPath) && fs.statSync(segPath).size > 0)) {
-    if (s.done) return res.status(404).send('No more segments');
-    if (Date.now() > deadline) return res.status(504).send('Timeout waiting for segment');
+    if (s.done) { console.log(`[HLS] ${segName} → 404 session done`); return res.status(404).send('No more segments'); }
+    if (Date.now() > deadline) { console.log(`[HLS] ${segName} → 504 timeout`); return res.status(504).send('Timeout waiting for segment'); }
     await new Promise(r => setTimeout(r, 50));
   }
+  console.log(`[HLS] ${segName} → streaming`);
 
   // Stream bytes as ffmpeg writes them; end when the next segment appears
   // (ffmpeg only moves on once the current segment is fully flushed)
@@ -438,8 +447,8 @@ app.get('/hls/:id/:seg', async (req, res) => {
         if (!ok) await new Promise(r => res.once('drain', r));
       }
     } catch {
-      // File disappeared (e.g. delete_segments removed it) — end the response cleanly
-      break;
+      // Transient read error (e.g. Windows file lock) — retry unless file is gone
+      if (!fs.existsSync(segPath)) break;
     }
     if (s.done || fs.existsSync(nextPath)) {
       // Final drain: read any bytes written in the last polling gap
@@ -452,8 +461,10 @@ app.get('/hls/:id/:seg', async (req, res) => {
           fs.readSync(fd, buf, 0, len, offset);
           fs.closeSync(fd);
           res.write(buf);
+          offset += len;
         }
       } catch {}
+      console.log(`[HLS] ${segName} → done (${offset}B sent)`);
       break;
     }
     await new Promise(r => setTimeout(r, 50));
