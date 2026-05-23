@@ -264,7 +264,7 @@ function waitForFile(filePath, timeoutMs) {
   });
 }
 
-async function generateSession(filePath, seekSeconds) {
+function generateSession(filePath, seekSeconds) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const dir = path.join(os.tmpdir(), `ch_${id}`);
   fs.mkdirSync(dir, { recursive: true });
@@ -277,24 +277,16 @@ async function generateSession(filePath, seekSeconds) {
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '256k',
     '-hls_time', '6', '-hls_list_size', '5',
-    '-hls_flags', 'temp_file+delete_segments',
+    '-hls_flags', 'delete_segments',
     '-hls_segment_filename', path.join(dir, 'seg%05d.ts'),
     path.join(dir, 'playlist.m3u8')
   ]);
 
+  const session = { proc, dir, lastPlaylist: null, done: false };
   proc.stderr.on('data', d => { const s = d.toString().trim(); if (s) console.log('[HLS]', s.substring(0, 120)); });
-  proc.on('close', code => console.log(`[CastHub] HLS ${id} ended (exit ${code})`));
-  sessions.set(id, { proc, dir });
+  proc.on('close', code => { session.done = true; console.log(`[CastHub] HLS ${id} ended (exit ${code})`); });
+  sessions.set(id, session);
   console.log(`[CastHub] HLS session started: ${id} seek=${seekSeconds}s`);
-
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    try {
-      if (fs.readdirSync(dir).some(f => f.endsWith('.ts'))) break;
-    } catch (_) {}
-    await new Promise(r => setTimeout(r, 300));
-  }
-
   return id;
 }
 
@@ -327,54 +319,111 @@ app.get('/hls/:id/master.m3u8', (req, res) => {
 app.get('/hls/:id/playlist.m3u8', async (req, res) => {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).send('Session not found');
+
+  res.setHeader('Content-Type', 'application/x-mpegURL');
+  res.setHeader('Cache-Control', 'no-cache');
+
   const plist = path.join(s.dir, 'playlist.m3u8');
-  try {
-    // Wait for a complete, non-truncated playlist
-    const deadline = Date.now() + 30000;
-    let content = '';
-    while (Date.now() < deadline) {
-      try {
-        const raw = fs.readFileSync(plist, 'utf8');
-        const segLines = raw.split('\n').filter(l => l.trim() && !l.startsWith('#'));
-        // Only serve once the last segment line is a complete filename
-        if (segLines.length > 0 && segLines[segLines.length - 1].trim().endsWith('.ts')) {
-          content = raw;
-          break;
-        }
-      } catch {}
-      await new Promise(r => setTimeout(r, 200));
-    }
-    if (!content) throw new Error('Playlist never became complete');
-    console.log('[HLS] Playlist ready, last segment:', content.split('\n').filter(l=>l.endsWith('.ts')).pop());
-    // Replace absolute paths with just filenames so Chromecast can resolve them
-    content = content.split('\n').map(line => {
-      const t = line.trim();
-      if (t && !t.startsWith('#')) return path.basename(t);
-      return line;
-    }).join('\n');
-    res.setHeader('Content-Type', 'application/x-mpegURL');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.send(content);
-  } catch (e) {
-    console.error('[CastHub] Playlist error:', e.message);
-    res.status(504).send('Timeout waiting for playlist');
+  const seg0  = path.join(s.dir, 'seg00000.ts');
+  const deadline = Date.now() + 30000;
+
+  while (Date.now() < deadline) {
+    // 1. Try real playlist — cache valid reads to survive mid-write truncation
+    try {
+      const raw = fs.readFileSync(plist, 'utf8');
+      const segLines = raw.split('\n').filter(l => l.trim() && !l.startsWith('#'));
+      if (segLines.length > 0 && segLines[segLines.length - 1].trim().endsWith('.ts')) {
+        const content = raw.split('\n').map(line => {
+          const t = line.trim();
+          return (t && !t.startsWith('#')) ? path.basename(t) : line;
+        }).join('\n');
+        s.lastPlaylist = content;
+        return res.send(content);
+      }
+    } catch {}
+
+    // 2. Mid-write: serve cached version so Chromecast doesn't get truncated content
+    if (s.lastPlaylist) return res.send(s.lastPlaylist);
+
+    // 3. seg00000.ts has started — synthesise a one-entry playlist so Chromecast
+    //    can begin fetching and buffering it before the segment is fully encoded
+    try {
+      if (fs.existsSync(seg0) && fs.statSync(seg0).size > 0) {
+        return res.send([
+          '#EXTM3U',
+          '#EXT-X-VERSION:3',
+          '#EXT-X-TARGETDURATION:7',
+          '#EXT-X-MEDIA-SEQUENCE:0',
+          '#EXTINF:6.000,',
+          'seg00000.ts'
+        ].join('\n'));
+      }
+    } catch {}
+
+    await new Promise(r => setTimeout(r, 150));
   }
+
+  res.status(504).send('Timeout waiting for playlist');
 });
 
 app.get('/hls/:id/:seg', async (req, res) => {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).send('Session not found');
-  const segPath = path.join(s.dir, req.params.seg);
-  try {
-    await waitForFile(segPath, 20000);
-    const size = fs.statSync(segPath).size;
-    res.setHeader('Content-Type', 'video/MP2T');
-    res.setHeader('Content-Length', size);
-    res.setHeader('Cache-Control', 'no-cache');
-    fs.createReadStream(segPath).pipe(res);
-  } catch (e) {
-    res.status(504).send('Timeout waiting for segment');
+
+  const segName  = req.params.seg;
+  const segPath  = path.join(s.dir, segName);
+  const segNum   = parseInt((segName.match(/(\d+)\.ts$/) || [])[1] ?? '0', 10);
+  const nextPath = path.join(s.dir, `seg${String(segNum + 1).padStart(5, '0')}.ts`);
+
+  // Wait for the segment file to start being written
+  const deadline = Date.now() + 20000;
+  while (!(fs.existsSync(segPath) && fs.statSync(segPath).size > 0)) {
+    if (s.done) return res.status(404).send('No more segments');
+    if (Date.now() > deadline) return res.status(504).send('Timeout waiting for segment');
+    await new Promise(r => setTimeout(r, 50));
   }
+
+  // Stream bytes as ffmpeg writes them; end when the next segment appears
+  // (ffmpeg only moves on once the current segment is fully flushed)
+  res.setHeader('Content-Type', 'video/MP2T');
+  res.setHeader('Cache-Control', 'no-cache');
+
+  let offset = 0;
+  let closed = false;
+  req.on('close', () => { closed = true; });
+
+  while (!closed) {
+    try {
+      const size = fs.statSync(segPath).size;
+      if (size > offset) {
+        const len = size - offset;
+        const buf = Buffer.allocUnsafe(len);
+        const fd  = fs.openSync(segPath, 'r');
+        fs.readSync(fd, buf, 0, len, offset);
+        fs.closeSync(fd);
+        offset += len;
+        const ok = res.write(buf);
+        if (!ok) await new Promise(r => res.once('drain', r));
+      }
+      if (s.done || fs.existsSync(nextPath)) {
+        // Final drain: read any bytes written in the last polling gap
+        try {
+          const final = fs.statSync(segPath).size;
+          if (final > offset) {
+            const len = final - offset;
+            const buf = Buffer.allocUnsafe(len);
+            const fd  = fs.openSync(segPath, 'r');
+            fs.readSync(fd, buf, 0, len, offset);
+            fs.closeSync(fd);
+            res.write(buf);
+          }
+        } catch {}
+        break;
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 50));
+  }
+  res.end();
 });
 
 // ── Direct file serve (MP4, WebM) ──────────────────────────────────
