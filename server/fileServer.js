@@ -264,7 +264,7 @@ function waitForFile(filePath, timeoutMs) {
   });
 }
 
-function generateSession(filePath, seekSeconds) {
+async function generateSession(filePath, seekSeconds) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const dir = path.join(os.tmpdir(), `ch_${id}`);
   fs.mkdirSync(dir, { recursive: true });
@@ -284,6 +284,15 @@ function generateSession(filePath, seekSeconds) {
   proc.on('close', code => console.log(`[CastHub] HLS ${id} ended (exit ${code})`));
   sessions.set(id, { proc, dir });
   console.log(`[CastHub] HLS session started: ${id} seek=${seekSeconds}s`);
+
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    try {
+      if (fs.readdirSync(dir).some(f => f.endsWith('.ts'))) break;
+    } catch (_) {}
+    await new Promise(r => setTimeout(r, 300));
+  }
+
   return id;
 }
 

@@ -125,7 +125,7 @@ async function buildCastURL(filePath, seekSeconds) {
       console.log(`[CastHub] Using HLS — EAC3: ${hasEAC3}, SSA: ${hasSSA}`);
       if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
       if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
-      const sessionId = generateSession(filePath, seek);
+      const sessionId = await generateSession(filePath, seek);
       currentHlsSessionId = sessionId;
       currentSeekOffset   = seek;
       currentFileIsLive   = true;
@@ -147,7 +147,7 @@ async function handleTSSeek(seconds) {
   const seekTo = Math.floor(seconds);
   if (currentHlsSessionId) {
     stopSession(currentHlsSessionId);
-    const sessionId = generateSession(currentFilePath, seekTo);
+    const sessionId = await generateSession(currentFilePath, seekTo);
     currentHlsSessionId = sessionId;
     livePausedAt = null;
     const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
@@ -302,7 +302,7 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
         const resumeAt = livePausedAt !== null ? livePausedAt : getLiveTime();
         livePausedAt = null;
         stopSession(currentHlsSessionId);
-        const sessionId = generateSession(currentFilePath, Math.floor(resumeAt));
+        const sessionId = await generateSession(currentFilePath, Math.floor(resumeAt));
         currentHlsSessionId = sessionId;
         const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
         try { await castManager.reloadURL(url, st.title); }
@@ -318,7 +318,7 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
         const seekTo = Math.floor(value);
         livePausedAt = null;
         stopSession(currentHlsSessionId);
-        const sessionId = generateSession(currentFilePath, seekTo);
+        const sessionId = await generateSession(currentFilePath, seekTo);
         currentHlsSessionId = sessionId;
         const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
         try { await castManager.reloadURL(url, st.title, { duration: liveDuration }); }
