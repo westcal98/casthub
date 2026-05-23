@@ -277,6 +277,7 @@ async function generateSession(filePath, seekSeconds) {
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '256k',
     '-hls_time', '6', '-hls_list_size', '5',
+    '-hls_flags', 'temp_file+delete_segments',
     '-hls_segment_filename', path.join(dir, 'seg%05d.ts'),
     path.join(dir, 'playlist.m3u8')
   ]);
@@ -366,8 +367,6 @@ app.get('/hls/:id/:seg', async (req, res) => {
   const segPath = path.join(s.dir, req.params.seg);
   try {
     await waitForFile(segPath, 20000);
-    // Small delay to ensure segment is fully written
-    await new Promise(r => setTimeout(r, 250));
     const size = fs.statSync(segPath).size;
     res.setHeader('Content-Type', 'video/MP2T');
     res.setHeader('Content-Length', size);
