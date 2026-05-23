@@ -274,7 +274,8 @@ async function generateSession(filePath, seekSeconds) {
     '-ss', String(seekSeconds || 0),
     '-i', filePath,
     '-map', '0:v:0', '-map', '0:a:0',
-    '-c:v', 'copy', '-tag:v', 'hvc1', '-c:a', 'aac', '-b:a', '256k',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '256k',
     '-hls_time', '6', '-hls_list_size', '5',
     '-hls_segment_filename', path.join(dir, 'seg%05d.ts'),
     path.join(dir, 'playlist.m3u8')
@@ -314,8 +315,7 @@ app.get('/hls/:id/master.m3u8', (req, res) => {
   const master = [
     '#EXTM3U',
     '#EXT-X-VERSION:3',
-    '#EXT-X-INDEPENDENT-SEGMENTS',
-    '#EXT-X-STREAM-INF:BANDWIDTH=15000000,CODECS="hvc1.2.4.L153.B0,mp4a.40.2",RESOLUTION=3840x1600,FRAME-RATE=23.976',
+    '#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS="avc1.640028,mp4a.40.2"',
     'playlist.m3u8'
   ].join('\n');
   res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
