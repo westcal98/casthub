@@ -308,9 +308,8 @@ function generateSession(filePath, seekSeconds) {
     '-i', toFfmpegPath(filePath),
     '-map', '0:v:0', '-map', '0:a:0',
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-b:a', '256k',
-    '-hls_time', '6', '-hls_list_size', '5',
-    '-hls_flags', 'delete_segments',
+    '-c:a', 'aac', '-b:a', '256k', '-ac', '2',
+    '-hls_time', '6', '-hls_list_size', '0', '-hls_playlist_type', 'event',
     '-hls_segment_filename', toFfmpegPath(path.join(dir, 'seg%05d.ts')),
     toFfmpegPath(path.join(dir, 'playlist.m3u8'))
   ]);
