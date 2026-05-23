@@ -30,40 +30,6 @@
       options.maxInactivity = 3600;
       context.start(options);
 
-      // Block seeks from the TV remote — our streams are piped (no byte-range support),
-      // so native CAF seeks would stall. All seeking is handled by CastHub reloading the URL.
-      const playerManager = context.getPlayerManager();
-
-      // Chain to next MKV segment when current one ends
-      playerManager.addEventListener(
-        cast.framework.events.EventType.ENDED,
-        () => {
-          const mediaInfo = playerManager.getMediaInformation();
-          if (!mediaInfo) return;
-          const url   = mediaInfo.contentId || '';
-          const match = url.match(/\/segment\/([^/]+)\/(\d+)$/);
-          if (!match) return;
-          const nextIndex = parseInt(match[2], 10) + 1;
-          const nextUrl   = url.replace(/\/\d+$/, `/${nextIndex}`);
-
-          const nextMedia = new cast.framework.messages.MediaInformation();
-          nextMedia.contentId   = nextUrl;
-          nextMedia.contentType = 'video/x-matroska';
-          nextMedia.streamType  = cast.framework.messages.StreamType.BUFFERED;
-          nextMedia.metadata    = mediaInfo.metadata;
-
-          const req = new cast.framework.messages.LoadRequestData();
-          req.media    = nextMedia;
-          req.autoplay = true;
-
-          setTimeout(() => {
-            context.getPlayerManager().load(req).catch(() => {
-              // 404 = last segment; playback ends normally
-            });
-          }, 0);
-        }
-      );
-
       // Inject CSS into cast-media-player shadow DOM
       // Hides: LIVE badge, loading spinner, and centers the metadata bar
       function patchShadowDOM() {

@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs   = require('fs');
-const { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, TRANSCODE_EXTS, startSegmentSession, stopSegmentSession, stopAllSegmentSessions } = require('./server/fileServer');
+const { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, TRANSCODE_EXTS, generateSession, stopSession, startSegmentSession, stopSegmentSession, stopAllSegmentSessions } = require('./server/fileServer');
 const { startWSServer, stopWSServer, broadcast, onMobileCommand, onBrowseRequest, setStateGetter } = require('./server/wsServer');
 const CastManager = require('./server/cast');
 
@@ -33,11 +33,12 @@ castManager._onStateChange = (state) => {
   mainWindow?.webContents.send('cast-state', state);
   broadcast({ type: 'state', ...state });
 };
-let currentFilePath   = null;
-let currentFileIsLive = false;
-let currentSessionId  = null;   // active segmented MKV session
-let currentSeekOffset = 0;      // seek position the current session started from
-let lastDeviceHost    = null;   // persists after disconnect for before-quit
+let currentFilePath    = null;
+let currentFileIsLive  = false;
+let currentSessionId   = null;   // active segmented MKV session
+let currentHlsSessionId = null;  // active HLS session
+let currentSeekOffset  = 0;      // seek position the current session started from
+let lastDeviceHost     = null;   // persists after disconnect for before-quit
 
 // ── Live stream time tracking ──────────────────────────────────────
 let liveTimer     = null;
@@ -101,7 +102,7 @@ app.whenReady().then(async () => {
       if (cmd.action === 'cast') {
         const url = await buildCastURL(cmd.filePath, 0);
         await castManager.castURL(castManager.getState().deviceHost, url, path.basename(cmd.filePath));
-      } else if (cmd.action === 'seek' && (currentFileIsLive || currentSessionId)) {
+      } else if (cmd.action === 'seek' && (currentFileIsLive || currentSessionId || currentHlsSessionId)) {
         await handleTSSeek(cmd.value);
       } else {
         await castManager.control(cmd.action, cmd.value);
@@ -121,15 +122,19 @@ async function buildCastURL(filePath, seekSeconds) {
   if (TRANSCODE_EXTS.has(ext)) {
     const { hasEAC3, hasSSA, duration } = await getStreamInfo(filePath);
     if (hasEAC3 || hasSSA) {
-      console.log(`[CastHub] Needs segmented remux — EAC3: ${hasEAC3}, SSA: ${hasSSA}`);
-      const { sessionId, firstSegmentUrl } = await startSegmentSession(filePath, seek);
-      currentSessionId  = sessionId;
-      currentSeekOffset = seek;
-      currentFileIsLive = false;
+      console.log(`[CastHub] Using HLS — EAC3: ${hasEAC3}, SSA: ${hasSSA}`);
+      if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
+      if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
+      const sessionId = generateSession(filePath, seek);
+      currentHlsSessionId = sessionId;
+      currentSeekOffset   = seek;
+      currentFileIsLive   = true;
       if (duration) liveDuration = duration;
-      return firstSegmentUrl;
+      startLiveTimer(seek, duration);
+      return `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
     }
   }
+  if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
   currentFileIsLive = false;
   currentSessionId  = null;
   currentSeekOffset = 0;
@@ -138,9 +143,18 @@ async function buildCastURL(filePath, seekSeconds) {
 
 async function handleTSSeek(seconds) {
   if (!currentFilePath) return;
-  const state   = castManager.getState();
-  const seekTo  = Math.floor(seconds);
-  if (currentSessionId) {
+  const state  = castManager.getState();
+  const seekTo = Math.floor(seconds);
+  if (currentHlsSessionId) {
+    stopSession(currentHlsSessionId);
+    const sessionId = generateSession(currentFilePath, seekTo);
+    currentHlsSessionId = sessionId;
+    livePausedAt = null;
+    const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
+    try { await castManager.reloadURL(url, state.title, { duration: liveDuration }); }
+    catch { await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration }); }
+    startLiveTimer(seekTo, liveDuration);
+  } else if (currentSessionId) {
     const { sessionId, firstSegmentUrl } = await startSegmentSession(currentFilePath, seekTo);
     currentSessionId  = sessionId;
     currentSeekOffset = seekTo;
@@ -155,6 +169,7 @@ async function handleTSSeek(seconds) {
 
 app.on('before-quit', (e) => {
   stopAllSegmentSessions();
+  if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
   // Dismiss receiver if we ever connected — even if user already clicked Stop
   if (!lastDeviceHost && !castManager.getState().connected) {
     stopFileServer(); stopWSServer();
@@ -189,7 +204,8 @@ ipcMain.handle('get-cast-state', () => castManager.getState());
 ipcMain.handle('soft-stop', async () => {
   try {
     stopLiveTimer();
-    if (currentSessionId) { stopSegmentSession(currentSessionId); currentSessionId = null; }
+    if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
+    if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
     currentFilePath   = null;
     currentFileIsLive = false;
     currentSeekOffset = 0;
@@ -202,7 +218,8 @@ ipcMain.handle('soft-stop', async () => {
 ipcMain.handle('disconnect', async () => {
   try {
     stopLiveTimer();
-    if (currentSessionId) { stopSegmentSession(currentSessionId); currentSessionId = null; }
+    if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
+    if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
     currentFilePath   = null;
     currentFileIsLive = false;
     currentSeekOffset = 0;
@@ -266,6 +283,54 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       return { success: true };
     }
 
+    // ── HLS session controls ──────────────────────────────────────────
+    if (currentHlsSessionId && currentFilePath) {
+      const st = castManager.getState();
+
+      if (action === 'pause') {
+        livePausedAt = getLiveTime();
+        stopLiveTimer();
+        await castManager.softStop();
+        const ps = { ...castManager.getState(), status:'paused',
+                     currentTime:livePausedAt, duration:liveDuration, connected:true };
+        mainWindow?.webContents.send('cast-state', ps);
+        broadcast({ type:'state', ...ps });
+        return { success: true };
+      }
+
+      if (action === 'play') {
+        const resumeAt = livePausedAt !== null ? livePausedAt : getLiveTime();
+        livePausedAt = null;
+        stopSession(currentHlsSessionId);
+        const sessionId = generateSession(currentFilePath, Math.floor(resumeAt));
+        currentHlsSessionId = sessionId;
+        const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
+        try { await castManager.reloadURL(url, st.title); }
+        catch { await castManager.castURL(st.deviceHost, url, st.title); }
+        startLiveTimer(resumeAt, liveDuration);
+        const ns = { ...castManager.getState(), currentTime:resumeAt, duration:liveDuration };
+        broadcast({ type:'state', ...ns });
+        mainWindow?.webContents.send('cast-state', ns);
+        return { success: true };
+      }
+
+      if (action === 'seek') {
+        const seekTo = Math.floor(value);
+        livePausedAt = null;
+        stopSession(currentHlsSessionId);
+        const sessionId = generateSession(currentFilePath, seekTo);
+        currentHlsSessionId = sessionId;
+        const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
+        try { await castManager.reloadURL(url, st.title, { duration: liveDuration }); }
+        catch { await castManager.castURL(st.deviceHost, url, st.title, { duration: liveDuration }); }
+        startLiveTimer(seekTo, liveDuration);
+        const ns = { ...castManager.getState(), currentTime:seekTo, duration:liveDuration };
+        broadcast({ type:'state', ...ns });
+        mainWindow?.webContents.send('cast-state', ns);
+        return { success: true };
+      }
+    }
+
     if (currentFileIsLive && currentFilePath) {
       const st = castManager.getState();
 
@@ -307,7 +372,8 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       }
     }
     if (action === 'stop') {
-      if (currentSessionId) { stopSegmentSession(currentSessionId); currentSessionId = null; }
+      if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
+      if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
       currentFilePath = null; currentFileIsLive = false; currentSeekOffset = 0; stopLiveTimer();
     }
     await castManager.control(action, value);

@@ -165,10 +165,11 @@ class CastManager {
   reloadURL(url, title, { duration = 0 } = {}) {
     return new Promise((resolve, reject) => {
       if (!this.player) return reject(new Error('No active player'));
+      const isHLS       = url.includes('/hls/') || url.endsWith('.m3u8');
       const isRemux     = url.includes('/remux');
       const isSegment   = url.includes('/segment/');
-      const contentType = (isRemux || isSegment) ? 'video/x-matroska' : 'video/mp4';
-      const streamType  = isRemux ? 'LIVE' : 'BUFFERED';
+      const contentType = isHLS ? 'application/vnd.apple.mpegurl' : (isRemux || isSegment) ? 'video/x-matroska' : 'video/mp4';
+      const streamType  = (isHLS || isRemux) ? 'LIVE' : 'BUFFERED';
       const media = { contentId: url, contentType, streamType,
                       metadata: { type:0, metadataType:0, title: title || this.state.title },
                       ...(duration > 0 && { duration }) };

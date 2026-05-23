@@ -275,7 +275,7 @@ function generateSession(filePath, seekSeconds) {
     '-i', filePath,
     '-map', '0:v:0', '-map', '0:a:0',
     '-c:v', 'copy', '-tag:v', 'hvc1', '-c:a', 'aac', '-b:a', '256k',
-    '-hls_time', '4', '-hls_list_size', '0',
+    '-hls_time', '6', '-hls_list_size', '5',
     '-hls_segment_filename', path.join(dir, 'seg%05d.ts'),
     path.join(dir, 'playlist.m3u8')
   ]);
