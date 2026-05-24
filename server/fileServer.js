@@ -317,14 +317,12 @@ function generateSession(filePath, seekSeconds) {
   const dir = path.join(getSessionTempBase(), `ch_${id}`);
   fs.mkdirSync(dir, { recursive: true });
 
-  const hwaccelArgs = useQSV ? ['-hwaccel', 'auto'] : [];
   const videoArgs   = useQSV
     ? ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '26']
     : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p'];
 
   const proc = spawn(ffmpegPath, [
     '-hide_banner', '-loglevel', 'warning',
-    ...hwaccelArgs,
     '-ss', String(seekSeconds || 0),
     '-i', toFfmpegPath(filePath),
     '-map', '0:v:0', '-map', '0:a:0',

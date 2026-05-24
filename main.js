@@ -59,9 +59,12 @@ castManager._onStateChange = (state) => {
         const sessionId = generateSession(currentFilePath, seekTo);
         currentHlsSessionId = sessionId;
         const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
-        await castManager.castURL(lastDeviceHost, url,
-          castManager.getState().title || path.basename(currentFilePath),
-          { duration: liveDuration });
+        isSeeking = true;
+        try {
+          await castManager.castURL(lastDeviceHost, url,
+            castManager.getState().title || path.basename(currentFilePath),
+            { duration: liveDuration });
+        } finally { isSeeking = false; }
         startLiveTimer(seekTo, liveDuration);
         startPositionSave();
         console.log('[CastHub] Reconnected successfully at', seekTo, 's');
@@ -69,6 +72,9 @@ castManager._onStateChange = (state) => {
     }, 5000);
     return;
   }
+
+  // Suppress IDLE INTERRUPTED from reaching renderer during seek (debounce would flash dropzone)
+  if (isSeeking && state.status === 'idle') return;
 
   if (currentSessionId && state.segmentIndex != null) {
     state = { ...state,
@@ -91,6 +97,7 @@ let currentFileIsLive  = false;
 let currentSessionId   = null;   // active segmented MKV session
 let currentHlsSessionId = null;  // active HLS session
 let currentSeekOffset  = 0;      // seek position the current session started from
+let isSeeking          = false;  // suppress idle events to renderer during HLS session switches
 let lastDeviceHost     = null;   // persists after disconnect for before-quit
 
 // ── Live stream time tracking ──────────────────────────────────────
@@ -113,6 +120,7 @@ function startLiveTimer(seekOffset, duration) {
   if (duration) liveDuration = duration;
   if (liveTimer) clearInterval(liveTimer);
   liveTimer = setInterval(() => {
+    if (isSeeking) return;
     if (!currentFileIsLive || !castManager.getState().connected) return;
     const t = getLiveTime();
     const s = { ...castManager.getState(), currentTime: t,
@@ -205,8 +213,11 @@ async function handleTSSeek(seconds) {
     currentHlsSessionId = sessionId;
     livePausedAt = null;
     const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
-    try { await castManager.reloadURL(url, state.title, { duration: liveDuration }); }
-    catch { await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration }); }
+    isSeeking = true;
+    try {
+      try { await castManager.reloadURL(url, state.title, { duration: liveDuration }); }
+      catch { await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration }); }
+    } finally { isSeeking = false; }
     startLiveTimer(seekTo, liveDuration);
   } else if (currentSessionId) {
     const { sessionId, firstSegmentUrl } = await startSegmentSession(currentFilePath, seekTo);
@@ -308,15 +319,15 @@ ipcMain.handle('cast-file', async (_, { filePath, deviceHost, seekSeconds }) => 
     const alreadyConnected = castManager.getState().connected ||
                              (castManager.client != null);
     const opts = { duration: liveDuration };
-    if (alreadyConnected) {
-      try {
-        await castManager.reloadURL(url, title, opts);
-      } catch {
+    isSeeking = true;
+    try {
+      if (alreadyConnected) {
+        try { await castManager.reloadURL(url, title, opts); }
+        catch { await castManager.castURL(deviceHost, url, title, opts); }
+      } else {
         await castManager.castURL(deviceHost, url, title, opts);
       }
-    } else {
-      await castManager.castURL(deviceHost, url, title, opts);
-    }
+    } finally { isSeeking = false; }
     startPositionSave();
     const state = castManager.getState();
     broadcast({ type:'state', ...state });
@@ -379,8 +390,11 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
         const sessionId = generateSession(currentFilePath, seekTo);
         currentHlsSessionId = sessionId;
         const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
-        try { await castManager.reloadURL(url, st.title, { duration: liveDuration }); }
-        catch { await castManager.castURL(st.deviceHost, url, st.title, { duration: liveDuration }); }
+        isSeeking = true;
+        try {
+          try { await castManager.reloadURL(url, st.title, { duration: liveDuration }); }
+          catch { await castManager.castURL(st.deviceHost, url, st.title, { duration: liveDuration }); }
+        } finally { isSeeking = false; }
         startLiveTimer(seekTo, liveDuration);
         const ns = { ...castManager.getState(), currentTime:seekTo, duration:liveDuration };
         broadcast({ type:'state', ...ns });
