@@ -1,7 +1,7 @@
 'use strict';
 const api = window.castHub;
 
-let queue = [], devices = [], castState = null, activeIdx = -1, seekDragging = false, isCasting = false, autoPlay = false, disconnecting = false, idleTimer = null;
+let queue = [], devices = [], castState = null, activeIdx = -1, seekDragging = false, isCasting = false, autoPlay = false, disconnecting = false, idleTimer = null, currentFilePath = null, resumeDismissTimer = null, thumbDebounceTimer = null;
 
 const $ = id => document.getElementById(id);
 const queueList       = $('queue-list'),    queueEmpty    = $('queue-empty');
@@ -14,6 +14,7 @@ const seekBar         = $('seek-bar'),     volBar         = $('vol-bar');
 const timeCurrent     = $('time-current'), timeTotal      = $('time-total');
 const mobileIPDisplay = $('mobile-ip-display');
 const resumeNotice    = $('resume-notice'), resumeLabel = $('resume-label');
+const thumbImg        = $('thumb-img'),     thumbIcon   = $('thumb-icon'),  thumbOverlay = $('thumb-overlay');
 
 function fmt(s) {
   if (!s || isNaN(s)) return '0:00';
@@ -25,8 +26,27 @@ function uid() { return Math.random().toString(36).slice(2); }
 function showResumeNotice(pos) {
   resumeLabel.textContent = `Resume from ${fmt(pos)}?`;
   resumeNotice.style.display = 'flex';
+  if (resumeDismissTimer) clearTimeout(resumeDismissTimer);
+  resumeDismissTimer = setTimeout(hideResumeNotice, 5000);
 }
-function hideResumeNotice() { resumeNotice.style.display = 'none'; }
+function hideResumeNotice() {
+  if (resumeDismissTimer) { clearTimeout(resumeDismissTimer); resumeDismissTimer = null; }
+  resumeNotice.style.display = 'none';
+}
+
+function loadThumb(filePath, t) {
+  if (!filePath) return;
+  thumbImg.onerror = () => { thumbImg.style.display = 'none'; thumbIcon.style.display = ''; };
+  thumbImg.onload  = () => { thumbImg.style.display = 'block'; thumbIcon.style.display = 'none'; };
+  thumbImg.src = `http://localhost:8765/thumbnail?path=${encodeURIComponent(filePath)}&t=${Math.max(0, Math.floor(t))}`;
+}
+function clearThumb() {
+  thumbImg.removeAttribute('src');
+  thumbImg.style.display = 'none'; thumbIcon.style.display = '';
+  thumbOverlay.style.display = 'none'; thumbOverlay.textContent = '';
+}
+function showThumbOverlay(text) { thumbOverlay.textContent = text; thumbOverlay.style.display = 'block'; }
+function hideThumbOverlay()     { thumbOverlay.style.display = 'none'; }
 
 function addFiles(paths) {
   paths.forEach(p => { if (!queue.find(q => q.path === p)) queue.push({ id:uid(), path:p, name:p.split(/[\\/]/).pop() }); });
@@ -83,15 +103,16 @@ function renderDevices() {
 function selectItem(idx) {
   activeIdx = idx;
   renderQueue();
-  // Show a "ready to play" state without actually casting
   const device = deviceSelect.value;
   if (queue[idx]) {
+    currentFilePath = queue[idx].path;
     npTitle.textContent  = queue[idx].name;
     npDevice.textContent = device ? `Ready to cast to ${devices.find(d=>d.host===device)?.name||device}` : 'Select a device above';
     dropzone.style.display   = 'none';
     nowPlaying.style.display = 'flex';
     controlsBar.style.display = 'block';
     btnPlayPause.textContent = '▶';
+    loadThumb(currentFilePath, 0);
   }
 }
 
@@ -101,6 +122,7 @@ async function castItem(idx) {
   if (!queue[idx]) return;
   activeIdx = idx; renderQueue();
   hideResumeNotice();
+  currentFilePath = queue[idx].path;
 
   let seekSeconds = 0;
   try {
@@ -111,6 +133,7 @@ async function castItem(idx) {
     }
   } catch {}
 
+  loadThumb(currentFilePath, seekSeconds);
   applyState({ connected:true, status:'buffering', title:queue[idx].name,
     deviceName: devices.find(d => d.host === device)?.name || device,
     currentTime: seekSeconds, duration: 0, volume:1, muted:false });
@@ -118,8 +141,7 @@ async function castItem(idx) {
   if (!result.success) {
     alert(`Cast error: ${result.error}`);
     activeIdx = -1; renderQueue();
-    hideResumeNotice();
-    applyState({ connected:false, status:'idle' });
+    disconnecting = true; fullStop(); disconnecting = false;
   }
 }
 
@@ -141,6 +163,13 @@ function showIdle() {
   dropzone.style.display    = '';
   nowPlaying.style.display  = 'none';
   controlsBar.style.display = 'none';
+}
+// Full cleanup only on an explicit user-initiated stop — NOT on transient idle debounce
+function fullStop() {
+  hideResumeNotice();
+  clearThumb();
+  currentFilePath = null;
+  showIdle();
 }
 
 function applyState(state) {
@@ -169,7 +198,12 @@ function applyState(state) {
     if (state.deviceName) castBadgeLabel.textContent = `Casting · ${state.deviceName}`;
   }
   btnPlayPause.textContent = state.status === 'playing' ? '⏸' : '▶';
-  if (!seekDragging) { seekBar.max = state.duration || 100; seekBar.value = state.currentTime || 0; }
+  if (!seekDragging) {
+    seekBar.max   = state.duration || 100;
+    seekBar.value = state.currentTime || 0;
+    const pct = state.duration ? Math.min(100, (state.currentTime || 0) / state.duration * 100) : 0;
+    seekBar.style.background = `linear-gradient(to right, var(--accent) ${pct}%, var(--card) ${pct}%)`;
+  }
   timeCurrent.textContent = fmt(state.currentTime);
   timeTotal.textContent   = fmt(state.duration);
   volBar.value            = state.muted ? 0 : (state.volume ?? 1);
@@ -183,7 +217,7 @@ async function ctrl(action, value) {
 btnDisconnect.addEventListener('click', async () => {
   disconnecting = true;
   isCasting = false;
-  showIdle();
+  fullStop();
   await api.disconnect();
   disconnecting = false;
 });
@@ -199,12 +233,13 @@ $('btn-playpause').addEventListener('click', () => {
 $('btn-stop').addEventListener('click', async () => {
   disconnecting = true;
   isCasting = false;
-  showIdle();
+  fullStop();
   await api.softStop();
   disconnecting = false;
 });
 $('btn-fwd').addEventListener('click',   () => ctrl('seek', (castState?.currentTime||0) + 30));
 $('btn-back').addEventListener('click',  () => ctrl('seek', Math.max(0, (castState?.currentTime||0) - 10)));
+$('btn-restart').addEventListener('click', () => ctrl('seek', 0));
 $('btn-prev').addEventListener('click', () => { if (activeIdx > 0) castItem(activeIdx - 1); });
 $('btn-next').addEventListener('click', () => { if (activeIdx < queue.length - 1) castItem(activeIdx + 1); });
 $('btn-start-over').addEventListener('click', () => { hideResumeNotice(); ctrl('seek', 0); });
@@ -220,7 +255,41 @@ api.onCastState(s => {
 });
 
 seekBar.addEventListener('mousedown', () => { seekDragging = true; });
-seekBar.addEventListener('mouseup',   () => { seekDragging = false; ctrl('seek', parseFloat(seekBar.value)); });
+seekBar.addEventListener('mouseup', () => {
+  seekDragging = false;
+  const t = parseFloat(seekBar.value);
+  hideThumbOverlay();
+  if (currentFilePath) loadThumb(currentFilePath, t);
+  ctrl('seek', t);
+});
+// Show time + thumbnail while dragging
+seekBar.addEventListener('input', () => {
+  if (!seekDragging || !currentFilePath) return;
+  const t = parseFloat(seekBar.value);
+  const pct = parseFloat(seekBar.max) ? t / parseFloat(seekBar.max) * 100 : 0;
+  seekBar.style.background = `linear-gradient(to right, var(--accent) ${pct}%, var(--card) ${pct}%)`;
+  showThumbOverlay(fmt(t));
+  if (thumbDebounceTimer) clearTimeout(thumbDebounceTimer);
+  thumbDebounceTimer = setTimeout(() => loadThumb(currentFilePath, t), 150);
+});
+// Show time + thumbnail while hovering (not dragging)
+seekBar.addEventListener('mousemove', e => {
+  if (!isCasting || !currentFilePath || !(castState?.duration > 0)) return;
+  const rect = seekBar.getBoundingClientRect();
+  const pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const t    = pct * parseFloat(seekBar.max || '100');
+  showThumbOverlay(fmt(t));
+  if (!seekDragging) {
+    if (thumbDebounceTimer) clearTimeout(thumbDebounceTimer);
+    thumbDebounceTimer = setTimeout(() => loadThumb(currentFilePath, t), 150);
+  }
+});
+seekBar.addEventListener('mouseleave', () => {
+  if (seekDragging) return;
+  hideThumbOverlay();
+  if (thumbDebounceTimer) { clearTimeout(thumbDebounceTimer); thumbDebounceTimer = null; }
+  if (currentFilePath && castState?.currentTime != null) loadThumb(currentFilePath, castState.currentTime);
+});
 volBar.addEventListener('input', () => ctrl('volume', parseFloat(volBar.value)));
 
 const stage = $('stage');
@@ -247,6 +316,32 @@ $('btn-minimize').addEventListener('click', () => api.minimize());
 $('btn-maximize').addEventListener('click', () => api.maximize());
 
 api.onDevicesUpdated(d => { devices = d; renderDevices(); });
+
+// ── Queue context menu & keyboard removal ──────────────────────────
+const ctxMenu = $('ctx-menu');
+let ctxTargetIdx = -1;
+
+queueList.addEventListener('contextmenu', e => {
+  const item = e.target.closest('.queue-item');
+  if (!item) return;
+  e.preventDefault();
+  ctxTargetIdx = +item.dataset.idx;
+  // Keep menu inside window
+  const mw = 170, mh = 40;
+  ctxMenu.style.left = Math.min(e.clientX, window.innerWidth  - mw) + 'px';
+  ctxMenu.style.top  = Math.min(e.clientY, window.innerHeight - mh) + 'px';
+  ctxMenu.style.display = 'block';
+});
+document.addEventListener('click',       () => { ctxMenu.style.display = 'none'; });
+document.addEventListener('contextmenu', e => { if (!e.target.closest('#queue-list')) ctxMenu.style.display = 'none'; });
+$('ctx-remove').addEventListener('click', () => {
+  if (ctxTargetIdx >= 0) { removeFromQueue(ctxTargetIdx); ctxTargetIdx = -1; }
+  ctxMenu.style.display = 'none';
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Delete' && activeIdx >= 0 && !isCasting) removeFromQueue(activeIdx);
+});
 
 // Restore queue from last session
 try {

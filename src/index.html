@@ -47,7 +47,11 @@
       </div>
       <div id="now-playing" style="display:none">
         <div class="np-device" id="np-device">Casting to —</div>
-        <div class="np-thumb">🎬</div>
+        <div class="np-thumb" id="np-thumb">
+          <span id="thumb-icon">🎬</span>
+          <img id="thumb-img" alt=""/>
+          <div id="thumb-overlay"></div>
+        </div>
         <div class="np-title" id="np-title">—</div>
       </div>
     </div>
@@ -63,6 +67,7 @@
         <span class="time-label right" id="time-total">0:00</span>
       </div>
       <div class="btns-row">
+        <button class="ctrl-btn" id="btn-restart" title="Restart">↺</button>
         <button class="ctrl-btn" id="btn-prev" title="Previous">⏮</button>
         <button class="ctrl-btn" id="btn-back">↩ 10</button>
         <button class="ctrl-btn primary" id="btn-playpause">⏸</button>
@@ -77,6 +82,9 @@
       </div>
     </div>
   </div>
+</div>
+<div id="ctx-menu" style="display:none">
+  <div id="ctx-remove">Remove from queue</div>
 </div>
 <script src="renderer.js"></script>
 </body>
