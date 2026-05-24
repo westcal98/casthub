@@ -82,3 +82,10 @@ html, body { height:100%; overflow:hidden; background:var(--bg); color:var(--tex
 .vol-icon { font-size:.9rem; color:var(--muted); }
 #vol-bar { flex:1; max-width:140px; -webkit-appearance:none; height:3px; background:var(--card); border-radius:2px; cursor:pointer; outline:none; }
 #vol-bar::-webkit-slider-thumb { -webkit-appearance:none; width:12px; height:12px; border-radius:50%; background:var(--text); cursor:pointer; }
+
+#resume-notice { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:7px 14px; margin:0 20px 6px; display:flex; align-items:center; gap:10px; font-size:.82rem; color:var(--muted); }
+#resume-notice #resume-label { flex:1; }
+#resume-notice button { background:none; border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:.75rem; padding:3px 9px; cursor:pointer; font-family:var(--font-b); transition:all .15s; }
+#resume-notice button:hover { border-color:var(--accent); color:var(--accent); }
+#resume-notice #btn-resume-dismiss { border:none; color:var(--muted); padding:3px 6px; font-size:.9rem; }
+#resume-notice #btn-resume-dismiss:hover { color:var(--danger); border:none; }

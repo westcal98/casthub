@@ -15,6 +15,21 @@ if (ffmpegPath && !fs.existsSync(ffmpegPath) && fs.existsSync(ffmpegPath + '.exe
 // Only applies WSL-specific path conversions — on Windows the paths are already correct
 const IS_WSL = (() => { try { return fs.readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft'); } catch { return false; } })();
 
+// Detect Intel Quick Sync at startup — synchronous, runs once, <2s
+let useQSV = false;
+if (ffmpegPath) {
+  try {
+    require('child_process').execFileSync(ffmpegPath,
+      ['-f', 'lavfi', '-i', 'nullsrc=s=64x64', '-frames:v', '2',
+       '-c:v', 'h264_qsv', '-f', 'null', 'pipe:1'],
+      { stdio: 'pipe', timeout: 8000 });
+    useQSV = true;
+    console.log('[CastHub] Intel Quick Sync (h264_qsv) available — hardware encoding enabled');
+  } catch {
+    console.log('[CastHub] QSV not available — using libx264 software encode');
+  }
+}
+
 // In WSL, /mnt/c/foo must become C:\foo for the Windows ffmpeg.exe binary
 function toFfmpegPath(p) {
   if (!IS_WSL || !ffmpegPath || !ffmpegPath.endsWith('.exe')) return p;
@@ -302,14 +317,20 @@ function generateSession(filePath, seekSeconds) {
   const dir = path.join(getSessionTempBase(), `ch_${id}`);
   fs.mkdirSync(dir, { recursive: true });
 
+  const hwaccelArgs = useQSV ? ['-hwaccel', 'auto'] : [];
+  const videoArgs   = useQSV
+    ? ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '26']
+    : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p'];
+
   const proc = spawn(ffmpegPath, [
     '-hide_banner', '-loglevel', 'warning',
+    ...hwaccelArgs,
     '-ss', String(seekSeconds || 0),
     '-i', toFfmpegPath(filePath),
     '-map', '0:v:0', '-map', '0:a:0',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p',
+    ...videoArgs,
     '-c:a', 'aac', '-b:a', '256k', '-ac', '2',
-    '-hls_time', '6', '-hls_list_size', '0', '-hls_playlist_type', 'event',
+    '-hls_time', '3', '-hls_list_size', '0', '-hls_playlist_type', 'event',
     '-hls_segment_filename', toFfmpegPath(path.join(dir, 'seg%05d.ts')),
     toFfmpegPath(path.join(dir, 'playlist.m3u8'))
   ]);

@@ -13,6 +13,7 @@ const npDevice        = $('np-device'),    btnPlayPause   = $('btn-playpause');
 const seekBar         = $('seek-bar'),     volBar         = $('vol-bar');
 const timeCurrent     = $('time-current'), timeTotal      = $('time-total');
 const mobileIPDisplay = $('mobile-ip-display');
+const resumeNotice    = $('resume-notice'), resumeLabel = $('resume-label');
 
 function fmt(s) {
   if (!s || isNaN(s)) return '0:00';
@@ -20,6 +21,12 @@ function fmt(s) {
   return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}` : `${m}:${String(sec).padStart(2,'0')}`;
 }
 function uid() { return Math.random().toString(36).slice(2); }
+
+function showResumeNotice(pos) {
+  resumeLabel.textContent = `Resume from ${fmt(pos)}?`;
+  resumeNotice.style.display = 'flex';
+}
+function hideResumeNotice() { resumeNotice.style.display = 'none'; }
 
 function addFiles(paths) {
   paths.forEach(p => { if (!queue.find(q => q.path === p)) queue.push({ id:uid(), path:p, name:p.split(/[\\/]/).pop() }); });
@@ -93,13 +100,25 @@ async function castItem(idx) {
   if (!device) return alert('No Chromecast selected.');
   if (!queue[idx]) return;
   activeIdx = idx; renderQueue();
+  hideResumeNotice();
+
+  let seekSeconds = 0;
+  try {
+    const saved = await api.getPosition(queue[idx].path);
+    if (saved && saved.pos > 60 && (!saved.dur || saved.pos / saved.dur < 0.95)) {
+      seekSeconds = saved.pos;
+      showResumeNotice(saved.pos);
+    }
+  } catch {}
+
   applyState({ connected:true, status:'buffering', title:queue[idx].name,
     deviceName: devices.find(d => d.host === device)?.name || device,
-    currentTime:0, duration:0, volume:1, muted:false });
-  const result = await api.castFile({ filePath: queue[idx].path, deviceHost: device });
+    currentTime: seekSeconds, duration: 0, volume:1, muted:false });
+  const result = await api.castFile({ filePath: queue[idx].path, deviceHost: device, seekSeconds });
   if (!result.success) {
     alert(`Cast error: ${result.error}`);
     activeIdx = -1; renderQueue();
+    hideResumeNotice();
     applyState({ connected:false, status:'idle' });
   }
 }
@@ -188,6 +207,8 @@ $('btn-fwd').addEventListener('click',   () => ctrl('seek', (castState?.currentT
 $('btn-back').addEventListener('click',  () => ctrl('seek', Math.max(0, (castState?.currentTime||0) - 10)));
 $('btn-prev').addEventListener('click', () => { if (activeIdx > 0) castItem(activeIdx - 1); });
 $('btn-next').addEventListener('click', () => { if (activeIdx < queue.length - 1) castItem(activeIdx + 1); });
+$('btn-start-over').addEventListener('click', () => { hideResumeNotice(); ctrl('seek', 0); });
+$('btn-resume-dismiss').addEventListener('click', hideResumeNotice);
 
 // Auto-play: when status goes IDLE and autoPlay is on, play next
 api.onCastState(s => {

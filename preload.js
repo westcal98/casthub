@@ -11,8 +11,9 @@ contextBridge.exposeInMainWorld('castHub', {
   minimize: () => ipcRenderer.send('win-minimize'),
   maximize: () => ipcRenderer.send('win-maximize'),
   close:    () => ipcRenderer.send('win-close'),
-  saveQueue: (q) => ipcRenderer.invoke('save-queue', q),
-  loadQueue: ()  => ipcRenderer.invoke('load-queue'),
+  saveQueue:   (q)  => ipcRenderer.invoke('save-queue', q),
+  loadQueue:   ()   => ipcRenderer.invoke('load-queue'),
+  getPosition: (fp) => ipcRenderer.invoke('get-position', fp),
   onDevicesUpdated: (cb) => ipcRenderer.on('devices-updated', (_, d) => cb(d)),
   onCastState:      (cb) => ipcRenderer.on('cast-state',      (_, s) => cb(s)),
 });

@@ -84,7 +84,18 @@ class CastManager {
           });
         });
       });
-      this.client.on('error', err => { console.error('[CastHub] Cast error:', err.message); this.state.connected = false; reject(err); });
+      this.client.on('error', err => {
+        console.error('[CastHub] Cast error:', err.message);
+        if (this.state.connected) {
+          // Post-connect drop — signal main.js to attempt reconnect
+          this.state.connected = false;
+          this.state.status = 'idle';
+          if (this._onStateChange) this._onStateChange({ ...this.state, _connectionLost: true });
+        } else {
+          this.state.connected = false;
+          reject(err);
+        }
+      });
     });
   }
 

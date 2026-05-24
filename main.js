@@ -1,7 +1,8 @@
 require('./logger');
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
-const path = require('path');
-const fs   = require('fs');
+const path   = require('path');
+const fs     = require('fs');
+const crypto = require('crypto');
 const { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, TRANSCODE_EXTS, generateSession, stopSession, startSegmentSession, stopSegmentSession, stopAllSegmentSessions } = require('./server/fileServer');
 const { startWSServer, stopWSServer, broadcast, onMobileCommand, onBrowseRequest, setStateGetter } = require('./server/wsServer');
 const CastManager = require('./server/cast');
@@ -12,17 +13,68 @@ app.commandLine.appendSwitch('disable-features', 'NetworkServiceInProcess');
 let mainWindow;
 const castManager = new CastManager();
 
-// Broadcast state to renderer + mobile whenever cast state changes
+// ── Resume position store ──────────────────────────────────────────
+let POSITIONS_FILE = null; // set after app.whenReady (app.getPath needs app to be ready)
+function loadPositions() {
+  try { return JSON.parse(fs.readFileSync(POSITIONS_FILE, 'utf8')); } catch { return {}; }
+}
+function savePosition(filePath, pos, dur) {
+  if (!POSITIONS_FILE || !filePath || pos < 60) return;
+  const positions = loadPositions();
+  const key = crypto.createHash('md5').update(filePath).digest('hex');
+  positions[key] = { pos: Math.floor(pos), dur: Math.floor(dur || liveDuration || 0), ts: Date.now() };
+  try { fs.writeFileSync(POSITIONS_FILE, JSON.stringify(positions)); } catch {}
+}
+function getPositionFor(filePath) {
+  if (!POSITIONS_FILE || !filePath) return null;
+  const positions = loadPositions();
+  const key = crypto.createHash('md5').update(filePath).digest('hex');
+  const saved = positions[key];
+  if (!saved || saved.pos < 60) return null;
+  if (saved.dur > 0 && saved.pos / saved.dur > 0.95) return null; // near end — don't resume
+  return saved;
+}
 
-// Broadcast state to renderer + mobile whenever cast state changes
+let positionSaveInterval = null;
+function startPositionSave() {
+  if (positionSaveInterval) clearInterval(positionSaveInterval);
+  positionSaveInterval = setInterval(() => {
+    if (currentFilePath && currentHlsSessionId) savePosition(currentFilePath, getLiveTime(), liveDuration);
+  }, 30000);
+}
+function stopPositionSave() {
+  if (positionSaveInterval) { clearInterval(positionSaveInterval); positionSaveInterval = null; }
+}
+
+// ── State change handler ───────────────────────────────────────────
 castManager._onStateChange = (state) => {
+  // Reconnect on dropped TCP connection during active playback
+  if (state._connectionLost && currentFilePath && currentHlsSessionId) {
+    const seekTo = Math.floor(getLiveTime());
+    console.log(`[CastHub] Connection lost — reconnecting in 5s at ${seekTo}s`);
+    stopLiveTimer(); stopPositionSave();
+    setTimeout(async () => {
+      try {
+        if (currentHlsSessionId) stopSession(currentHlsSessionId);
+        const sessionId = generateSession(currentFilePath, seekTo);
+        currentHlsSessionId = sessionId;
+        const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
+        await castManager.castURL(lastDeviceHost, url,
+          castManager.getState().title || path.basename(currentFilePath),
+          { duration: liveDuration });
+        startLiveTimer(seekTo, liveDuration);
+        startPositionSave();
+        console.log('[CastHub] Reconnected successfully at', seekTo, 's');
+      } catch (err) { console.error('[CastHub] Reconnect failed:', err.message); }
+    }, 5000);
+    return;
+  }
+
   if (currentSessionId && state.segmentIndex != null) {
-    // Segmented sessions: adjust currentTime by segment offset so the UI shows absolute position
     state = { ...state,
       currentTime: currentSeekOffset + state.segmentIndex * 10 + state.currentTime,
       duration:    liveDuration || state.duration };
   } else if (currentFileIsLive) {
-    // LIVE remux: Chromecast reports currentTime:0 — use local timer instead
     if (livePausedAt !== null) {
       state = { ...state, status:'paused', currentTime:livePausedAt,
                 duration:liveDuration || state.duration, connected:true };
@@ -86,6 +138,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  POSITIONS_FILE = path.join(app.getPath('userData'), 'casthub_positions.json');
   await startFileServer();
   setStateGetter(() => castManager.getState());
   startWSServer();
@@ -204,7 +257,8 @@ ipcMain.handle('get-cast-state', () => castManager.getState());
 
 ipcMain.handle('soft-stop', async () => {
   try {
-    stopLiveTimer();
+    savePosition(currentFilePath, getLiveTime(), liveDuration);
+    stopLiveTimer(); stopPositionSave();
     if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
     if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
     currentFilePath   = null;
@@ -218,7 +272,8 @@ ipcMain.handle('soft-stop', async () => {
 
 ipcMain.handle('disconnect', async () => {
   try {
-    stopLiveTimer();
+    savePosition(currentFilePath, getLiveTime(), liveDuration);
+    stopLiveTimer(); stopPositionSave();
     if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
     if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
     currentFilePath   = null;
@@ -241,9 +296,11 @@ ipcMain.handle('open-file', async () => {
   return result.filePaths;
 });
 
-ipcMain.handle('cast-file', async (_, { filePath, deviceHost }) => {
+ipcMain.handle('get-position', (_, filePath) => getPositionFor(filePath));
+
+ipcMain.handle('cast-file', async (_, { filePath, deviceHost, seekSeconds }) => {
   try {
-    const url   = await buildCastURL(filePath, 0);
+    const url   = await buildCastURL(filePath, seekSeconds || 0);
     const title = path.basename(filePath);
     lastDeviceHost = deviceHost;
     // If receiver is already running, reloadURL skips TCP reconnect + receiver relaunch
@@ -260,6 +317,7 @@ ipcMain.handle('cast-file', async (_, { filePath, deviceHost }) => {
     } else {
       await castManager.castURL(deviceHost, url, title, opts);
     }
+    startPositionSave();
     const state = castManager.getState();
     broadcast({ type:'state', ...state });
     mainWindow?.webContents.send('cast-state', state);
@@ -291,6 +349,7 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       if (action === 'pause') {
         livePausedAt = getLiveTime();
         stopLiveTimer();
+        savePosition(currentFilePath, livePausedAt, liveDuration);
         try { await castManager.control('pause'); }
         catch { await castManager.softStop(); } // fallback if native pause rejected
         const ps = { ...castManager.getState(), status:'paused',
@@ -305,6 +364,7 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
         livePausedAt = null;
         await castManager.control('play');
         startLiveTimer(resumeAt, liveDuration);
+        startPositionSave();
         const ns = { ...castManager.getState(), currentTime:resumeAt, duration:liveDuration };
         broadcast({ type:'state', ...ns });
         mainWindow?.webContents.send('cast-state', ns);
@@ -313,6 +373,7 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
 
       if (action === 'seek') {
         const seekTo = Math.floor(value);
+        savePosition(currentFilePath, getLiveTime(), liveDuration);
         livePausedAt = null;
         stopSession(currentHlsSessionId);
         const sessionId = generateSession(currentFilePath, seekTo);
