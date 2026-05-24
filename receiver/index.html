@@ -24,37 +24,68 @@
   <cast-media-player></cast-media-player>
   <script>
     window.addEventListener('load', function() {
-      const context = cast.framework.CastReceiverContext.getInstance();
-      const options  = new cast.framework.CastReceiverOptions();
+      const context       = cast.framework.CastReceiverContext.getInstance();
+      const playerManager = context.getPlayerManager();
+      const options       = new cast.framework.CastReceiverOptions();
       options.disableIdleTimeout = true;
       options.maxInactivity = 3600;
+
+      // ── Seek-offset time correction ────────────────────────────────
+      // Each seek spawns a new HLS session starting at stream position 0.
+      // The sender passes customData.seekOffset so the receiver can display
+      // the real movie time instead of the stream-relative 0:00.
+      let seekOffset = 0;
+
+      playerManager.setMessageInterceptor(
+        cast.framework.messages.MessageType.LOAD,
+        function(request) {
+          seekOffset = (request.media && request.media.customData && request.media.customData.seekOffset) || 0;
+          return request;
+        }
+      );
+
+      function fmt(s) {
+        s = Math.max(0, Math.floor(s));
+        var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        return h > 0
+          ? h + ':' + String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0')
+          : m + ':' + String(sec).padStart(2, '0');
+      }
+
+      // On every TIME_UPDATE, reach into the shadow DOM and overwrite the
+      // time text nodes with the offset-corrected values.
+      // Falls back silently if class names differ in a future CAF version.
+      playerManager.addEventListener(cast.framework.events.EventType.TIME_UPDATE, function() {
+        if (!seekOffset) return;
+        var cur   = playerManager.getCurrentTimeSec() + seekOffset;
+        var dur   = playerManager.getDurationSec();
+        var total = dur > 0 ? seekOffset + dur : 0;
+        var shadow = document.querySelector('cast-media-player') &&
+                     document.querySelector('cast-media-player').shadowRoot;
+        if (!shadow) return;
+        var curEl = shadow.querySelector('.current-time');
+        var endEl = shadow.querySelector('.end-time');
+        if (curEl) curEl.textContent = fmt(cur);
+        if (endEl) endEl.textContent = total > 0 ? fmt(total) : '';
+      });
+
       context.start(options);
 
-      // Inject CSS into cast-media-player shadow DOM
-      // Hides: LIVE badge, loading spinner, and centers the metadata bar
+      // ── Shadow DOM patches ─────────────────────────────────────────
       function patchShadowDOM() {
-        const player = document.querySelector('cast-media-player');
-        if (!player || !player.shadowRoot) {
-          setTimeout(patchShadowDOM, 500);
-          return;
-        }
-        const style = document.createElement('style');
-        style.textContent = `
-          /* Hide LIVE badge */
-          .live-badge, .live-indicator, [class*="live"] { display: none !important; }
-          /* Hide loading spinner that pushes bar right */
-          .spinner-layer, .spinner, [class*="spinner"],
-          .buffering-spinner, .loading-spinner { display: none !important; }
-          /* Center the metadata / controls overlay */
-          .player-controls-bottom, .controls-container,
-          .metadata-container, .progress-container {
-            left: 0 !important;
-            right: 0 !important;
-            width: 100% !important;
-            margin: 0 auto !important;
-            text-align: center !important;
-          }
-        `;
+        var player = document.querySelector('cast-media-player');
+        if (!player || !player.shadowRoot) { setTimeout(patchShadowDOM, 500); return; }
+        var style = document.createElement('style');
+        style.textContent = [
+          '.live-badge, .live-indicator, [class*="live"] { display: none !important; }',
+          '.spinner-layer, .spinner, [class*="spinner"],',
+          '.buffering-spinner, .loading-spinner { display: none !important; }',
+          '.player-controls-bottom, .controls-container,',
+          '.metadata-container, .progress-container {',
+          '  left: 0 !important; right: 0 !important;',
+          '  width: 100% !important; margin: 0 auto !important;',
+          '  text-align: center !important; }'
+        ].join('\n');
         player.shadowRoot.appendChild(style);
       }
       setTimeout(patchShadowDOM, 1000);

@@ -42,7 +42,7 @@ class CastManager {
     browser.on('down', svc => { this.devices = this.devices.filter(d => d.host !== svc.host); onUpdate([...this.devices]); });
   }
 
-  castURL(deviceHost, url, title, { duration = 0 } = {}) {
+  castURL(deviceHost, url, title, { duration = 0, seekOffset = 0 } = {}) {
     return new Promise((resolve, reject) => {
       if (this.client) { try { this.client.close(); } catch {} this.client = null; this.player = null; }
       if (!deviceHost) return reject(new Error('No device selected'));
@@ -61,6 +61,7 @@ class CastManager {
           const media = {
             contentId: url, contentType, streamType,
             metadata: { type:0, metadataType:0, title },
+            customData: { seekOffset },
             ...(duration > 0 && { duration })
           };
           player.load(media, { autoplay: true }, (err, status) => {
@@ -174,7 +175,7 @@ class CastManager {
   }
 
   // Reload media on existing connection — much faster than full castURL()
-  reloadURL(url, title, { duration = 0 } = {}) {
+  reloadURL(url, title, { duration = 0, seekOffset = 0 } = {}) {
     return new Promise((resolve, reject) => {
       if (!this.player) return reject(new Error('No active player'));
       const isHLS       = url.includes('/hls/') || url.endsWith('.m3u8');
@@ -184,6 +185,7 @@ class CastManager {
       const streamType  = isRemux ? 'LIVE' : 'BUFFERED';
       const media = { contentId: url, contentType, streamType,
                       metadata: { type:0, metadataType:0, title: title || this.state.title },
+                      customData: { seekOffset },
                       ...(duration > 0 && { duration }) };
       if (this._statusInterval) { clearInterval(this._statusInterval); this._statusInterval = null; }
       this.player.load(media, { autoplay: true }, (err, status) => {

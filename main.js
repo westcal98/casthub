@@ -63,7 +63,7 @@ castManager._onStateChange = (state) => {
         try {
           await castManager.castURL(lastDeviceHost, url,
             castManager.getState().title || path.basename(currentFilePath),
-            { duration: liveDuration });
+            { duration: liveDuration, seekOffset: seekTo });
         } finally { isSeeking = false; }
         startLiveTimer(seekTo, liveDuration);
         startPositionSave();
@@ -215,8 +215,8 @@ async function handleTSSeek(seconds) {
     const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
     isSeeking = true;
     try {
-      try { await castManager.reloadURL(url, state.title, { duration: liveDuration }); }
-      catch { await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration }); }
+      try { await castManager.reloadURL(url, state.title, { duration: liveDuration, seekOffset: seekTo }); }
+      catch { await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration, seekOffset: seekTo }); }
     } finally { isSeeking = false; }
     startLiveTimer(seekTo, liveDuration);
   } else if (currentSessionId) {
@@ -318,7 +318,7 @@ ipcMain.handle('cast-file', async (_, { filePath, deviceHost, seekSeconds }) => 
     // Falls back to full castURL if reload fails (e.g. first cast, or after Stop)
     const alreadyConnected = castManager.getState().connected ||
                              (castManager.client != null);
-    const opts = { duration: liveDuration };
+    const opts = { duration: liveDuration, seekOffset: seekSeconds || 0 };
     isSeeking = true;
     try {
       if (alreadyConnected) {
@@ -392,8 +392,8 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
         const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
         isSeeking = true;
         try {
-          try { await castManager.reloadURL(url, st.title, { duration: liveDuration }); }
-          catch { await castManager.castURL(st.deviceHost, url, st.title, { duration: liveDuration }); }
+          try { await castManager.reloadURL(url, st.title, { duration: liveDuration, seekOffset: seekTo }); }
+          catch { await castManager.castURL(st.deviceHost, url, st.title, { duration: liveDuration, seekOffset: seekTo }); }
         } finally { isSeeking = false; }
         startLiveTimer(seekTo, liveDuration);
         const ns = { ...castManager.getState(), currentTime:seekTo, duration:liveDuration };
