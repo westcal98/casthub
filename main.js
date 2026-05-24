@@ -1,9 +1,17 @@
+process.on('uncaughtException', (err) => {
+  console.error('[CastHub] Uncaught exception (caught):', err.message);
+  // Don't crash — log and continue
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[CastHub] Unhandled rejection (caught):', reason);
+});
+
 require('./logger');
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path   = require('path');
 const fs     = require('fs');
 const crypto = require('crypto');
-const { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, TRANSCODE_EXTS, generateSession, stopSession, startSegmentSession, stopSegmentSession, stopAllSegmentSessions } = require('./server/fileServer');
+const { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, TRANSCODE_EXTS, generateSession, stopSession } = require('./server/fileServer');
 const { startWSServer, stopWSServer, broadcast, onMobileCommand, onBrowseRequest, setStateGetter } = require('./server/wsServer');
 const CastManager = require('./server/cast');
 
@@ -65,6 +73,7 @@ castManager._onStateChange = (state) => {
             castManager.getState().title || path.basename(currentFilePath),
             { duration: liveDuration, seekOffset: seekTo });
         } finally { isSeeking = false; }
+        applyPendingSeek();
         startLiveTimer(seekTo, liveDuration);
         startPositionSave();
         console.log('[CastHub] Reconnected successfully at', seekTo, 's');
@@ -76,11 +85,7 @@ castManager._onStateChange = (state) => {
   // Suppress IDLE INTERRUPTED from reaching renderer during seek (debounce would flash dropzone)
   if (isSeeking && state.status === 'idle') return;
 
-  if (currentSessionId && state.segmentIndex != null) {
-    state = { ...state,
-      currentTime: currentSeekOffset + state.segmentIndex * 10 + state.currentTime,
-      duration:    liveDuration || state.duration };
-  } else if (currentFileIsLive) {
+  if (currentFileIsLive) {
     if (livePausedAt !== null) {
       state = { ...state, status:'paused', currentTime:livePausedAt,
                 duration:liveDuration || state.duration, connected:true };
@@ -94,10 +99,9 @@ castManager._onStateChange = (state) => {
 };
 let currentFilePath    = null;
 let currentFileIsLive  = false;
-let currentSessionId   = null;   // active segmented MKV session
 let currentHlsSessionId = null;  // active HLS session
-let currentSeekOffset  = 0;      // seek position the current session started from
 let isSeeking          = false;  // suppress idle events to renderer during HLS session switches
+let pendingHlsSeek     = null;   // seek queued while isSeeking=true; applied after connection completes
 let lastDeviceHost     = null;   // persists after disconnect for before-quit
 
 // ── Live stream time tracking ──────────────────────────────────────
@@ -136,6 +140,13 @@ function stopLiveTimer() {
   // livePausedAt intentionally NOT cleared here — managed by pause/resume actions
 }
 
+function applyPendingSeek() {
+  if (pendingHlsSeek === null) return;
+  const seekTo = pendingHlsSeek;
+  pendingHlsSeek = null;
+  setImmediate(() => handleTSSeek(seekTo).catch(err => console.error('[CastHub] pendingSeek error:', err.message)));
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width:960, height:660, minWidth:760, minHeight:520,
@@ -164,7 +175,7 @@ app.whenReady().then(async () => {
       if (cmd.action === 'cast') {
         const url = await buildCastURL(cmd.filePath, 0);
         await castManager.castURL(castManager.getState().deviceHost, url, path.basename(cmd.filePath));
-      } else if (cmd.action === 'seek' && (currentFileIsLive || currentSessionId || currentHlsSessionId)) {
+      } else if (cmd.action === 'seek' && (currentFileIsLive || currentHlsSessionId)) {
         await handleTSSeek(cmd.value);
       } else {
         await castManager.control(cmd.action, cmd.value);
@@ -186,10 +197,8 @@ async function buildCastURL(filePath, seekSeconds) {
     if (hasEAC3 || hasSSA) {
       console.log(`[CastHub] Using HLS — EAC3: ${hasEAC3}, SSA: ${hasSSA}`);
       if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
-      if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
       const sessionId = generateSession(filePath, seek);
       currentHlsSessionId = sessionId;
-      currentSeekOffset   = seek;
       currentFileIsLive   = true;
       if (duration) liveDuration = duration;
       startLiveTimer(seek, duration);
@@ -198,8 +207,6 @@ async function buildCastURL(filePath, seekSeconds) {
   }
   if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
   currentFileIsLive = false;
-  currentSessionId  = null;
-  currentSeekOffset = 0;
   return `http://${getLocalIP()}:8765/transcode?path=${encodeURIComponent(filePath)}`;
 }
 
@@ -216,15 +223,10 @@ async function handleTSSeek(seconds) {
     isSeeking = true;
     try {
       try { await castManager.reloadURL(url, state.title, { duration: liveDuration, seekOffset: seekTo }); }
-      catch { await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration, seekOffset: seekTo }); }
+      catch { await castManager.castURL(lastDeviceHost || state.deviceHost, url, state.title, { duration: liveDuration, seekOffset: seekTo }); }
     } finally { isSeeking = false; }
+    applyPendingSeek();
     startLiveTimer(seekTo, liveDuration);
-  } else if (currentSessionId) {
-    const { sessionId, firstSegmentUrl } = await startSegmentSession(currentFilePath, seekTo);
-    currentSessionId  = sessionId;
-    currentSeekOffset = seekTo;
-    try { await castManager.reloadURL(firstSegmentUrl, state.title, { duration: liveDuration }); }
-    catch { await castManager.castURL(state.deviceHost, firstSegmentUrl, state.title, { duration: liveDuration }); }
   } else {
     const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${seekTo}`;
     await castManager.castURL(state.deviceHost, url, state.title, { duration: liveDuration });
@@ -233,7 +235,6 @@ async function handleTSSeek(seconds) {
 }
 
 app.on('before-quit', (e) => {
-  stopAllSegmentSessions();
   if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
   // Dismiss receiver if we ever connected — even if user already clicked Stop
   if (!lastDeviceHost && !castManager.getState().connected) {
@@ -270,11 +271,9 @@ ipcMain.handle('soft-stop', async () => {
   try {
     savePosition(currentFilePath, getLiveTime(), liveDuration);
     stopLiveTimer(); stopPositionSave();
-    if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
     if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
     currentFilePath   = null;
     currentFileIsLive = false;
-    currentSeekOffset = 0;
     livePausedAt      = null;
     await castManager.stopMedia();
     return { success: true };
@@ -285,11 +284,9 @@ ipcMain.handle('disconnect', async () => {
   try {
     savePosition(currentFilePath, getLiveTime(), liveDuration);
     stopLiveTimer(); stopPositionSave();
-    if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
     if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
     currentFilePath   = null;
     currentFileIsLive = false;
-    currentSeekOffset = 0;
     await castManager.disconnect();
     lastDeviceHost = null;
     const state = castManager.getState();
@@ -328,6 +325,7 @@ ipcMain.handle('cast-file', async (_, { filePath, deviceHost, seekSeconds }) => 
         await castManager.castURL(deviceHost, url, title, opts);
       }
     } finally { isSeeking = false; }
+    applyPendingSeek();
     startPositionSave();
     const state = castManager.getState();
     broadcast({ type:'state', ...state });
@@ -338,21 +336,6 @@ ipcMain.handle('cast-file', async (_, { filePath, deviceHost, seekSeconds }) => 
 
 ipcMain.handle('cast-control', async (_, { action, value }) => {
   try {
-    // ── Segmented session seek ─────────────────────────────────────
-    if (currentSessionId && currentFilePath && action === 'seek') {
-      const seekTo = Math.floor(value);
-      const st     = castManager.getState();
-      const { sessionId, firstSegmentUrl } = await startSegmentSession(currentFilePath, seekTo);
-      currentSessionId  = sessionId;
-      currentSeekOffset = seekTo;
-      try { await castManager.reloadURL(firstSegmentUrl, st.title, { duration: liveDuration }); }
-      catch { await castManager.castURL(st.deviceHost, firstSegmentUrl, st.title, { duration: liveDuration }); }
-      const ns = { ...castManager.getState() };
-      broadcast({ type:'state', ...ns });
-      mainWindow?.webContents.send('cast-state', ns);
-      return { success: true };
-    }
-
     // ── HLS session controls ──────────────────────────────────────────
     if (currentHlsSessionId && currentFilePath) {
       const st = castManager.getState();
@@ -384,6 +367,8 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
 
       if (action === 'seek') {
         const seekTo = Math.floor(value);
+        // If a cast/seek is already in-flight, queue this seek instead of racing with it
+        if (isSeeking) { pendingHlsSeek = seekTo; return { success: true }; }
         savePosition(currentFilePath, getLiveTime(), liveDuration);
         livePausedAt = null;
         stopSession(currentHlsSessionId);
@@ -393,8 +378,9 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
         isSeeking = true;
         try {
           try { await castManager.reloadURL(url, st.title, { duration: liveDuration, seekOffset: seekTo }); }
-          catch { await castManager.castURL(st.deviceHost, url, st.title, { duration: liveDuration, seekOffset: seekTo }); }
+          catch { await castManager.castURL(lastDeviceHost || st.deviceHost, url, st.title, { duration: liveDuration, seekOffset: seekTo }); }
         } finally { isSeeking = false; }
+        applyPendingSeek();
         startLiveTimer(seekTo, liveDuration);
         const ns = { ...castManager.getState(), currentTime:seekTo, duration:liveDuration };
         broadcast({ type:'state', ...ns });
@@ -444,9 +430,8 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       }
     }
     if (action === 'stop') {
-      if (currentSessionId)    { stopSegmentSession(currentSessionId); currentSessionId = null; }
       if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
-      currentFilePath = null; currentFileIsLive = false; currentSeekOffset = 0; stopLiveTimer();
+      currentFilePath = null; currentFileIsLive = false; stopLiveTimer();
     }
     await castManager.control(action, value);
     const state = castManager.getState();

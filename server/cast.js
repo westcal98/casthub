@@ -44,8 +44,9 @@ class CastManager {
 
   castURL(deviceHost, url, title, { duration = 0, seekOffset = 0 } = {}) {
     return new Promise((resolve, reject) => {
-      if (this.client) { try { this.client.close(); } catch {} this.client = null; this.player = null; }
+      try {
       if (!deviceHost) return reject(new Error('No device selected'));
+      if (this.client) { try { this.client.close(); } catch {} this.client = null; this.player = null; }
 
       const isHLS     = url.includes('/hls/') || url.endsWith('.m3u8');
       const isRemux   = url.includes('/remux');
@@ -54,6 +55,7 @@ class CastManager {
       const streamType  = isRemux ? 'LIVE' : 'BUFFERED';
 
       this.client = new Client();
+      this.client.on('error', err => console.error('[CastHub] Client error:', err.message));
       this.client.connect({ host: deviceHost, port: 8009 }, () => {
         this.client.launch(CastHubReceiver, (err, player) => {
           if (err) return reject(err);
@@ -71,8 +73,12 @@ class CastManager {
             this.state.title = title; this.state.status = 'playing';
             this._applyStatus(status);
             player.on('status', s => {
-              console.log('[CastHub] CC status:', s?.playerState, s?.idleReason || '');
-              this._applyStatus(s);
+              try {
+                console.log('[CastHub] CC status:', s?.playerState, s?.idleReason || '');
+                this._applyStatus(s);
+              } catch (err) {
+                console.error('[CastHub] status handler error:', err.message);
+              }
             });
             // Poll for currentTime updates
             if (this._statusInterval) clearInterval(this._statusInterval);
@@ -97,18 +103,18 @@ class CastManager {
           reject(err);
         }
       });
+      } catch (err) {
+        console.error('[CastHub] castURL error:', err.message);
+        reject(err);
+      }
     });
   }
 
   _applyStatus(s) {
-    if (!s) return;
+    if (!s || !s.media) return;
     if (s.playerState)         this.state.status      = s.playerState.toLowerCase();
     if (s.currentTime != null) this.state.currentTime = s.currentTime;
     if (s.media?.duration)     this.state.duration    = s.media.duration;
-    if (s.media) {
-      const m = (s.media.contentId || '').match(/\/segment\/[^/]+\/(\d+)$/);
-      this.state.segmentIndex = m ? parseInt(m[1], 10) : null;
-    }
     if (s.volume) {
       if (s.volume.level != null) this.state.volume = s.volume.level;
       if (s.volume.muted  != null) this.state.muted  = s.volume.muted;
