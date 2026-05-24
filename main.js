@@ -291,7 +291,8 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       if (action === 'pause') {
         livePausedAt = getLiveTime();
         stopLiveTimer();
-        await castManager.softStop();
+        try { await castManager.control('pause'); }
+        catch { await castManager.softStop(); } // fallback if native pause rejected
         const ps = { ...castManager.getState(), status:'paused',
                      currentTime:livePausedAt, duration:liveDuration, connected:true };
         mainWindow?.webContents.send('cast-state', ps);
@@ -302,12 +303,7 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       if (action === 'play') {
         const resumeAt = livePausedAt !== null ? livePausedAt : getLiveTime();
         livePausedAt = null;
-        stopSession(currentHlsSessionId);
-        const sessionId = generateSession(currentFilePath, Math.floor(resumeAt));
-        currentHlsSessionId = sessionId;
-        const url = `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
-        try { await castManager.reloadURL(url, st.title); }
-        catch { await castManager.castURL(st.deviceHost, url, st.title); }
+        await castManager.control('play');
         startLiveTimer(resumeAt, liveDuration);
         const ns = { ...castManager.getState(), currentTime:resumeAt, duration:liveDuration };
         broadcast({ type:'state', ...ns });

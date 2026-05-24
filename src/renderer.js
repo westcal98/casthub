@@ -1,7 +1,7 @@
 'use strict';
 const api = window.castHub;
 
-let queue = [], devices = [], castState = null, activeIdx = -1, seekDragging = false, isCasting = false, autoPlay = false, disconnecting = false;
+let queue = [], devices = [], castState = null, activeIdx = -1, seekDragging = false, isCasting = false, autoPlay = false, disconnecting = false, idleTimer = null;
 
 const $ = id => document.getElementById(id);
 const queueList       = $('queue-list'),    queueEmpty    = $('queue-empty');
@@ -126,11 +126,19 @@ function showIdle() {
 
 function applyState(state) {
   if (disconnecting) return;
-  castState = state;
   if (!state || state.status === 'idle' || !state.connected) {
-    if (isCasting) showIdle();
+    // Debounce idle: seeks cause transient IDLE INTERRUPTED/CANCELLED — don't reset UI immediately
+    if (isCasting && !idleTimer) {
+      idleTimer = setTimeout(() => {
+        idleTimer = null;
+        if (isCasting) { castState = state; showIdle(); }
+      }, 2500);
+    }
     return;
   }
+  // Non-idle state: cancel any pending idle transition and update UI
+  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+  castState = state;
   if (!isCasting) {
     // Only run full showCasting on idle→casting transition
     isCasting = true;
@@ -184,7 +192,8 @@ $('btn-next').addEventListener('click', () => { if (activeIdx < queue.length - 1
 // Auto-play: when status goes IDLE and autoPlay is on, play next
 api.onCastState(s => {
   if (s.status === 'idle' && isCasting && autoPlay && activeIdx >= 0 && activeIdx < queue.length - 1) {
-    setTimeout(() => castItem(activeIdx + 1), 1000);
+    // Delay to confirm idle is genuine (not transient seek-induced INTERRUPTED/CANCELLED)
+    setTimeout(() => { if (castState?.status === 'idle') castItem(activeIdx + 1); }, 2000);
   }
   applyState(s);
 });

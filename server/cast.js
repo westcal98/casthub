@@ -51,7 +51,7 @@ class CastManager {
       const isRemux   = url.includes('/remux');
       const isSegment = url.includes('/segment/');
       const contentType = isHLS ? 'application/vnd.apple.mpegurl' : (isRemux || isSegment) ? 'video/x-matroska' : 'video/mp4';
-      const streamType  = (isHLS || isRemux) ? 'LIVE' : 'BUFFERED';
+      const streamType  = isRemux ? 'LIVE' : 'BUFFERED';
 
       this.client = new Client();
       this.client.connect({ host: deviceHost, port: 8009 }, () => {
@@ -73,13 +73,13 @@ class CastManager {
               console.log('[CastHub] CC status:', s?.playerState, s?.idleReason || '');
               this._applyStatus(s);
             });
-            // Poll for currentTime updates every second
+            // Poll for currentTime updates
             if (this._statusInterval) clearInterval(this._statusInterval);
             this._statusInterval = setInterval(() => {
-              if (this.player && this.state.status === 'playing') {
+              if (this.player && (this.state.status === 'playing' || this.state.status === 'paused')) {
                 this.player.getStatus((err, s) => { if (s && !err) this._applyStatus(s); });
               }
-            }, 5000);
+            }, 1000);
             resolve();
           });
         });
@@ -170,7 +170,7 @@ class CastManager {
       const isRemux     = url.includes('/remux');
       const isSegment   = url.includes('/segment/');
       const contentType = isHLS ? 'application/vnd.apple.mpegurl' : (isRemux || isSegment) ? 'video/x-matroska' : 'video/mp4';
-      const streamType  = (isHLS || isRemux) ? 'LIVE' : 'BUFFERED';
+      const streamType  = isRemux ? 'LIVE' : 'BUFFERED';
       const media = { contentId: url, contentType, streamType,
                       metadata: { type:0, metadataType:0, title: title || this.state.title },
                       ...(duration > 0 && { duration }) };
@@ -182,10 +182,10 @@ class CastManager {
         this.state.title  = title || this.state.title;
         this._applyStatus(status);
         this._statusInterval = setInterval(() => {
-          if (this.player && this.state.status === 'playing') {
+          if (this.player && (this.state.status === 'playing' || this.state.status === 'paused')) {
             this.player.getStatus((err, s) => { if (s && !err) this._applyStatus(s); });
           }
-        }, 5000);
+        }, 1000);
         resolve();
       });
     });
