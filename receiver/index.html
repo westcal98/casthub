@@ -34,12 +34,24 @@
       // Each seek spawns a new HLS session starting at stream position 0.
       // The sender passes customData.seekOffset so the receiver can display
       // the real movie time instead of the stream-relative 0:00.
-      let seekOffset = 0;
+      let seekOffset    = 0;
+      let movieDuration = 0;
+
+      // Patch the two methods cast-media-player calls to drive its seek bar fill
+      // and time text. Returns movie-relative values instead of stream-relative,
+      // so the native bar shows correct position after seeks without shadow DOM guessing.
+      const _origCurrentTime = playerManager.getCurrentTimeSec.bind(playerManager);
+      const _origDuration    = playerManager.getDurationSec.bind(playerManager);
+      playerManager.getCurrentTimeSec = function() { return _origCurrentTime() + seekOffset; };
+      playerManager.getDurationSec    = function() {
+        return movieDuration > 0 ? movieDuration : (_origDuration() + seekOffset);
+      };
 
       playerManager.setMessageInterceptor(
         cast.framework.messages.MessageType.LOAD,
         function(request) {
-          seekOffset = (request.media && request.media.customData && request.media.customData.seekOffset) || 0;
+          seekOffset    = (request.media && request.media.customData && request.media.customData.seekOffset) || 0;
+          movieDuration = (request.media && request.media.duration) || 0;
           return request;
         }
       );
@@ -52,14 +64,11 @@
           : m + ':' + String(sec).padStart(2, '0');
       }
 
-      // On every TIME_UPDATE, reach into the shadow DOM and overwrite the
-      // time text nodes with the offset-corrected values.
-      // Falls back silently if class names differ in a future CAF version.
+      // Belt-and-suspenders: also patch shadow DOM time text nodes directly.
+      // getCurrentTimeSec() is already movie-relative due to the patch above.
       playerManager.addEventListener(cast.framework.events.EventType.TIME_UPDATE, function() {
-        if (!seekOffset) return;
-        var cur   = playerManager.getCurrentTimeSec() + seekOffset;
-        var dur   = playerManager.getDurationSec();
-        var total = dur > 0 ? seekOffset + dur : 0;
+        var cur   = playerManager.getCurrentTimeSec();
+        var total = playerManager.getDurationSec();
         var shadow = document.querySelector('cast-media-player') &&
                      document.querySelector('cast-media-player').shadowRoot;
         if (!shadow) return;
