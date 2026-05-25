@@ -340,7 +340,33 @@ $('ctx-remove').addEventListener('click', () => {
 });
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Delete' && activeIdx >= 0 && !isCasting) removeFromQueue(activeIdx);
+  if (e.target.tagName === 'SELECT') return;
+  switch (e.key) {
+    case 'Delete':
+      if (activeIdx >= 0 && !isCasting) removeFromQueue(activeIdx);
+      break;
+    case ' ':
+      e.preventDefault();
+      if (isCasting) ctrl(castState?.status === 'playing' ? 'pause' : 'play');
+      else if (activeIdx >= 0) castItem(activeIdx);
+      break;
+    case 'ArrowLeft':
+      e.preventDefault();
+      if (isCasting) ctrl('seek', Math.max(0, (castState?.currentTime || 0) - 10));
+      break;
+    case 'ArrowRight':
+      e.preventDefault();
+      if (isCasting) ctrl('seek', (castState?.currentTime || 0) + 30);
+      break;
+    case 'ArrowUp':
+      e.preventDefault();
+      if (activeIdx > 0) castItem(activeIdx - 1);
+      break;
+    case 'ArrowDown':
+      e.preventDefault();
+      if (activeIdx < queue.length - 1) castItem(activeIdx + 1);
+      break;
+  }
 });
 
 // Restore queue from last session
