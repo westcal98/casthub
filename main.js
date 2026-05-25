@@ -82,6 +82,12 @@ castManager._onStateChange = (state) => {
     return;
   }
 
+  // Start live timer on first PLAYING after a new session load (deferred from buildCastURL
+  // so the clock doesn't run ahead of the TV during the 15-20s buffering startup)
+  if (liveTimerPending && state.status === 'playing') {
+    startLiveTimer(liveTimerPending.base, liveTimerPending.duration);
+  }
+
   // Suppress IDLE INTERRUPTED from reaching renderer during seek (debounce would flash dropzone)
   if (isSeeking && state.status === 'idle') return;
 
@@ -105,11 +111,12 @@ let pendingHlsSeek     = null;   // seek queued while isSeeking=true; applied af
 let lastDeviceHost     = null;   // persists after disconnect for before-quit
 
 // ── Live stream time tracking ──────────────────────────────────────
-let liveTimer     = null;
-let liveSeekBase  = 0;
-let liveStartedAt = null;
-let livePausedAt  = null;
-let liveDuration  = 0;
+let liveTimer        = null;
+let liveSeekBase     = 0;
+let liveStartedAt    = null;
+let livePausedAt     = null;
+let liveDuration     = 0;
+let liveTimerPending = null; // { base, duration } — set by buildCastURL, started on first PLAYING
 
 function getLiveTime() {
   if (livePausedAt !== null) return livePausedAt;
@@ -118,6 +125,7 @@ function getLiveTime() {
 }
 
 function startLiveTimer(seekOffset, duration) {
+  liveTimerPending = null; // direct call wins over any deferred pending start
   liveSeekBase  = seekOffset || 0;
   liveStartedAt = Date.now();
   livePausedAt  = null;
@@ -199,9 +207,15 @@ async function buildCastURL(filePath, seekSeconds) {
       if (currentHlsSessionId) { stopSession(currentHlsSessionId); currentHlsSessionId = null; }
       const sessionId = generateSession(filePath, seek);
       currentHlsSessionId = sessionId;
-      currentFileIsLive   = true;
+      currentFileIsLive = true;
       if (duration) liveDuration = duration;
-      startLiveTimer(seek, duration);
+      // Set base position now so getLiveTime() returns the right value immediately,
+      // but defer starting the interval until the Chromecast confirms PLAYING —
+      // otherwise the app clock runs 15-20s ahead of the TV during buffering startup.
+      liveSeekBase     = seek;
+      liveStartedAt    = null;
+      livePausedAt     = null;
+      liveTimerPending = { base: seek, duration };
       return `http://${getLocalIP()}:8765/hls/${sessionId}/master.m3u8`;
     }
   }

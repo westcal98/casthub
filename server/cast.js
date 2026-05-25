@@ -46,7 +46,11 @@ class CastManager {
     return new Promise((resolve, reject) => {
       try {
       if (!deviceHost) return reject(new Error('No device selected'));
-      if (this.client) { try { this.client.close(); } catch {} this.client = null; this.player = null; }
+      if (this.client) {
+        if (this.player) { try { this.player.stop(() => {}); } catch {} }
+        try { this.client.close(); } catch {}
+        this.client = null; this.player = null;
+      }
 
       const isHLS     = url.includes('/hls/') || url.endsWith('.m3u8');
       const isRemux   = url.includes('/remux');
@@ -60,6 +64,7 @@ class CastManager {
         this.client.launch(CastHubReceiver, (err, player) => {
           if (err) return reject(err);
           this.player = player;
+          player.setMaxListeners(30);
           const media = {
             contentId: url, contentType, streamType,
             metadata: { type:0, metadataType:0, title },
@@ -111,7 +116,7 @@ class CastManager {
   }
 
   _applyStatus(s) {
-    if (!s || !s.media) return;
+    if (!s) return;
     if (s.playerState)         this.state.status      = s.playerState.toLowerCase();
     if (s.currentTime != null) this.state.currentTime = s.currentTime;
     if (s.media?.duration)     this.state.duration    = s.media.duration;
