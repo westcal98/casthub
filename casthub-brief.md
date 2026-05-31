@@ -35,11 +35,11 @@ C:\Users\westc\GitProjects\casthub\
   test.js           — Headless integration test (node test.js) — 5 WSL-safe steps
   server/
     cast.js         — CastManager, CastHubReceiver (APP_ID E8C19FEC), castURL, reconnect
-    fileServer.js   — Express: /transcode, /remux, /hls/*, getStreamInfo, QSV detection
+    fileServer.js   — Express: /transcode, /remux, /hls/*, /thumbnail, getStreamInfo, QSV detection
     wsServer.js     — WebSocket server for mobile remote
   src/
-    index.html      — Desktop UI (includes resume-notice bar)
-    renderer.js     — Queue, controls, applyState, resume-from-position flow
+    index.html      — Desktop UI (resume-notice bar, np-thumb preview box)
+    renderer.js     — Queue, controls, applyState, resume-from-position, thumbnail preview
     styles.css
   receiver/         — Custom Receiver HTML (auto-deploys to casthub-receiver.pages.dev)
   mobile/           — Mobile PWA (auto-deploys to casthub-mobile.pages.dev)
@@ -96,11 +96,11 @@ Airflow (`C:\Program Files\Airflow\`) is a **native C++ Qt5 app**, not Electron.
 |---|---|---|
 | Startup latency | ~1-2s (direct pipe) | ~3-4s (HLS 3s segments, live-streamed) |
 | Seek latency | ~1-2s (QSV decode) | ~3-5s (new ffmpeg process) |
-| Hardware encode | QSV h264_qsv | libx264 (QSV auto-detected if available) |
+| Hardware encode | QSV h264_qsv | QSV auto-detected at startup, libx264 fallback |
 | Subtitle rendering | Burns ASS/SSA into video | Strips subtitles (-sn flag) |
 | Resume position | SQLite per-file | JSON file per-file (casthub_positions.json) |
 | Reconnect | Yes (10s retry) | Yes (5s retry) |
-| HTTPS | Yes (self-signed) | HTTP only (not blocking) |
+| HTTPS | Yes (self-signed) | HTTP only (not currently blocking) |
 
 ---
 
@@ -138,7 +138,7 @@ execFile(ffmpegPath, ['-hide_banner', '-i', filePath], (_err, stdout, stderr) =>
 
 ### HLS Session Pipeline
 - `generateSession(filePath, seekSeconds)` spawns ffmpeg:
-  - Hardware: `-hwaccel auto -c:v h264_qsv -preset veryfast -global_quality 26` (if QSV detected)
+  - Hardware (if QSV detected): `-c:v h264_qsv -preset veryfast -global_quality 26`
   - Software fallback: `-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p`
   - Audio: `EAC3→AAC -ac 2 -b:a 256k` (stereo downmix required — Chromecast rejects 5.1 AAC in MPEG-TS)
   - Segments: `3s`, `hls_list_size 0`, `hls_playlist_type event`
@@ -147,6 +147,18 @@ execFile(ffmpegPath, ['-hide_banner', '-i', filePath], (_err, stdout, stderr) =>
 - `playlist.m3u8` endpoint: serves cached last-good playlist to survive mid-write truncation; synthesises a one-entry playlist as soon as seg00000.ts starts writing (fast startup)
 - Segment endpoint: streams bytes live as ffmpeg writes them; finalises when next segment file appears
 - Session cleanup: `stopSession(id)` kills ffmpeg + schedules temp dir removal after 4s
+
+### Thumbnail Endpoint
+- `GET /thumbnail?path=...&t=...` — spawns ffmpeg with `-ss {t} -frames:v 1 -q:v 5 -vf scale=640:-2`, pipes JPEG to response
+- Used by renderer to show a preview frame in the `#np-thumb` box
+- On seek bar hover/drag: fetches frame at cursor position (150ms debounce) and overlays time text on the box
+- Cache-Control: 60s so repeated requests at same timestamp are free
+
+### Seek-in-flight Queueing (pendingHlsSeek)
+- `isSeeking = true` is set in main.js while `castURL`/`reloadURL` is in-flight
+- If a seek arrives while `isSeeking`, it's stored in `pendingHlsSeek` and returns immediately
+- After the in-flight operation's `finally { isSeeking = false }`, `applyPendingSeek()` fires the queued seek
+- Prevents race condition where a concurrent seek kills the client mid-connect
 
 ### Pause/Resume for HLS Streams
 - **Pause**: `livePausedAt = getLiveTime()`, stops liveTimer, calls `castManager.control('pause')` → native PAUSE sent to Chromecast → video frame frozen on TV screen. Falls back to `softStop()` if native pause rejected.
@@ -163,6 +175,9 @@ liveSeekBase + (Date.now() - liveStartedAt) / 1000
 Variables: `liveTimer` (500ms tick), `liveSeekBase`, `liveStartedAt`, `livePausedAt`, `liveDuration`
 Functions: `startLiveTimer(seekOffset, duration)`, `stopLiveTimer()`, `getLiveTime()`
 
+### Idle State Debounce (renderer.js)
+Seeks fire IDLE INTERRUPTED/CANCELLED from Chromecast before new session starts PLAYING. Without debounce this resets the UI to dropzone mid-seek. Fix: 2.5s debounce before `showIdle()`. Genuine idle (stream ended, Stop pressed) still shows correctly via `fullStop()` called from explicit button handlers — NOT from `showIdle()` itself, which is safe to call from the debounce.
+
 ### Reconnect Logic
 - `cast.js`: error handler checks `this.state.connected` — if true, it's a post-connect drop; fires `_onStateChange` with `_connectionLost: true`
 - `main.js` `_onStateChange`: detects `_connectionLost`, waits 5s, creates new HLS session at current `getLiveTime()`, calls `castURL` to reconnect
@@ -172,19 +187,20 @@ Functions: `startLiveTimer(seekOffset, duration)`, `stopLiveTimer()`, `getLiveTi
 - Key: MD5 of file path
 - Saves on: pause, seek, stop, disconnect, every 30s during playback
 - Threshold: position > 60s AND < 95% of duration
-- UX: auto-resumes from saved position + shows "Resumed from X:XX | Start over" notice for 8s
+- UX: shows "Resume from X:XX? | Start over | ✕" notice — auto-dismisses after 5s if no action taken
 
-### Idle State Debounce (renderer.js)
-Seeks fire IDLE INTERRUPTED/CANCELLED from Chromecast before new session starts PLAYING. Without debounce this resets the UI to dropzone mid-seek. Fix: 2.5s debounce before `showIdle()`. Genuine idle (stream ended, Stop pressed) still shows correctly.
+### Custom Receiver (receiver/index.html)
+- CAF v3 receiver hosted at `casthub-receiver.pages.dev`, registered as App ID `E8C19FEC`
+- LOAD interceptor reads `customData.seekOffset` from each media load request
+- TIME_UPDATE handler overrides `.current-time` and `.end-time` shadow DOM text nodes with movie-relative time (stream position + seekOffset)
+- Also attempts to update seek bar fill position via shadow DOM (speculative selectors — may not match all CAF versions)
+- Deploy: `wrangler pages deploy receiver/ --project-name casthub-receiver`
 
 ### File Logging (logger.js)
 - Must be `require('./logger')` as the **first** require in main.js and test.js
 - Patches `console.log/error/warn` to tee to a timestamped log file in `logs/`
 - Keeps at most 5 log files (oldest deleted on startup)
 - Exports `logPath` so tests can print the full log path in their summary
-
-### Dead Code (safe to remove later)
-`startSegmentSession`, `stopSegmentSession`, `/session/start`, `/segment/:id/:index` routes, and `currentSessionId` branches in main.js — old MKV segmented remux path, replaced entirely by HLS. Not yet removed.
 
 ---
 
@@ -213,22 +229,26 @@ WSL-safe: steps 1-5 run in WSL; steps 6-12 (Chromecast network tests) skipped wi
 - Audio + video on all test files via HLS (H.264 + AAC stereo, EVENT playlist)
 - Pause: native Chromecast PAUSE command — video frame frozen on TV, app stays on controls
 - Play (resume from pause): native Chromecast PLAY — instant resume, no new HLS session needed
-- Seek / back 10s / fwd 30s: new HLS session at target time, UI stays on controls during transition (2.5s idle debounce)
-- Time bar: updates every 500ms (liveTimer) + 1s CC status poll (even when paused)
+- Seek / back 10s / fwd 30s: new HLS session at target time, UI stays on controls during transition
+- Time bar: updates every 500ms (liveTimer) + 1s CC status poll
 - Intel Quick Sync auto-detected at startup; falls back to libx264 if unavailable
-- Resume last position: auto-resumes with 8s "Start over" notice
+- Resume last position: auto-resumes with 5s dismissable notice; "Start over" queued safely if clicked before connection completes
 - Reconnect: 5s retry on dropped Chromecast TCP connection
-- Queue persistence (localStorage + IPC backup)
+- Queue persistence (localStorage + IPC backup); right-click or Delete key to remove items
 - Stop Casting properly disconnects and dismisses Chromecast receiver
 - File logging with 5-file rotation
 - Headless integration test (WSL-safe)
 - Receiver + mobile PWA auto-deploy via Cloudflare Pages
+- Thumbnail preview: frame shown in now-playing box; updates on seek bar hover/drag with time overlay
+- Seek bar fill (app): blue fill tracks playback position, updates live during drag
+- TV time text: receiver corrects current-time and end-time display to movie-relative values after seeks
+- Seek-in-flight queueing: seeks that arrive while connecting are queued, not dropped or raced
 
 ### Known Gaps ❌
+- **TV seek bar fill**: receiver attempts to update bar position via shadow DOM after seeks, but selectors are speculative — may not match current CAF v3 internals
 - **Subtitle rendering**: SSA/ASS subtitles are stripped (`-sn`). Airflow burns them into video. Implementing requires `-vf subtitles=...` filter + complex font handling.
 - **Direct MPEG-TS streaming**: Airflow pipes transcode output directly — no HLS overhead, ~1-2s startup. CastHub uses HLS (necessary for native pause/buffered seeking). Gap: ~1-2s additional startup latency.
 - **HTTPS**: Airflow uses HTTPS on port 42015. CastHub uses HTTP. Not currently blocking anything.
-- **Dead code**: Segmented-MKV session code still in fileServer.js / main.js, not yet cleaned up.
 
 ---
 

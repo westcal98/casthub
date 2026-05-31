@@ -54,8 +54,7 @@ function getSessionTempBase() {
 }
 
 const TRANSCODE_EXTS  = new Set(['mkv','avi','ts','wmv','flv']);
-const sessions        = new Map();
-const segmentSessions = new Map(); // sessionId → { filePath, seekOffset, tempDir, ffmpegProcess, done }
+const sessions = new Map();
 
 const app = express();
 let server;
@@ -86,145 +85,6 @@ function getStreamInfo(filePath) {
     });
   });
 }
-
-// ── Segmented MKV session system ──────────────────────────────────
-function startSegmentSession(filePath, seekOffset) {
-  return new Promise((resolve, reject) => {
-    if (!ffmpegPath) return reject(new Error('ffmpeg not available'));
-
-    // Kill any existing session for this file
-    for (const [id, s] of segmentSessions) {
-      if (s.filePath === filePath) {
-        try { s.ffmpegProcess.kill('SIGKILL'); } catch {}
-        segmentSessions.delete(id);
-        setTimeout(() => { try { fs.rmSync(s.tempDir, { recursive: true, force: true }); } catch {} }, 2000);
-      }
-    }
-
-    const sessionId = crypto.randomUUID();
-    const tempDir   = path.join(getSessionTempBase(), 'casthub-segments', sessionId);
-    fs.mkdirSync(tempDir, { recursive: true });
-
-    const proc = spawn(ffmpegPath, [
-      '-hide_banner', '-loglevel', 'error',
-      '-ss', String(seekOffset || 0),
-      '-i', toFfmpegPath(filePath),
-      '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-b:a', '256k', '-sn',
-      '-f', 'segment', '-segment_format', 'matroska',
-      '-segment_time', '10', '-segment_start_number', '0',
-      toFfmpegPath(path.join(tempDir, 'segment%d.mkv'))
-    ]);
-
-    const session = { filePath, seekOffset: seekOffset || 0, tempDir, ffmpegProcess: proc, done: false };
-    segmentSessions.set(sessionId, session);
-    proc.stderr.on('data', d => { const s = d.toString().trim(); if (s) console.error('[segment]', s); });
-    proc.on('close', code => {
-      session.done = true;
-      console.log(`[CastHub] Segment session ${sessionId} ended (exit ${code})`);
-    });
-
-    // Return as soon as segment0 starts being written — don't wait for finalization
-    const deadline = Date.now() + 10000;
-    (function waitForReady() {
-      const seg0 = path.join(tempDir, 'segment0.mkv');
-      try {
-        if (fs.existsSync(seg0))
-          return resolve({ sessionId, firstSegmentUrl: `http://${getLocalIP()}:8765/segment/${sessionId}/0` });
-      } catch {}
-      if (Date.now() > deadline) return reject(new Error('Timeout: ffmpeg did not produce output'));
-      setTimeout(waitForReady, 50);
-    })();
-  });
-}
-
-function stopSegmentSession(sessionId) {
-  const s = segmentSessions.get(sessionId);
-  if (!s) return;
-  try { s.ffmpegProcess.kill('SIGKILL'); } catch {}
-  segmentSessions.delete(sessionId);
-  setTimeout(() => { try { fs.rmSync(s.tempDir, { recursive: true, force: true }); } catch {} }, 2000);
-  console.log(`[CastHub] Segment session stopped: ${sessionId}`);
-}
-
-function stopAllSegmentSessions() {
-  for (const id of [...segmentSessions.keys()]) stopSegmentSession(id);
-}
-
-// ── Segmented MKV routes ───────────────────────────────────────────
-app.post('/session/start', express.json(), async (req, res) => {
-  const { filePath, seekOffset } = req.body || {};
-  if (!filePath || !fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
-  try {
-    const result = await startSegmentSession(filePath, seekOffset || 0);
-    res.json(result);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/segment/:sessionId/:index', async (req, res) => {
-  const session = segmentSessions.get(req.params.sessionId);
-  if (!session) return res.status(404).send('Session not found');
-  const index = parseInt(req.params.index, 10);
-  if (isNaN(index)) return res.status(400).send('Invalid segment index');
-
-  const segPath  = path.join(session.tempDir, `segment${index}.mkv`);
-  const nextPath = path.join(session.tempDir, `segment${index + 1}.mkv`);
-
-  // Wait for this segment to start being written
-  const deadline = Date.now() + 20000;
-  while (!fs.existsSync(segPath)) {
-    if (session.done) return res.status(404).send('No more segments');
-    if (Date.now() > deadline) return res.status(404).send('Timeout waiting for segment');
-    await new Promise(r => setTimeout(r, 50));
-  }
-
-  // Stream bytes live as ffmpeg writes them; end response when segment is finalized
-  res.setHeader('Content-Type', 'video/x-matroska');
-  res.setHeader('Accept-Ranges', 'bytes');
-
-  let offset = 0;
-  let closed = false;
-  req.on('close', () => { closed = true; });
-
-  while (!closed) {
-    try {
-      const size = fs.statSync(segPath).size;
-      if (size > offset) {
-        const len = size - offset;
-        const buf = Buffer.allocUnsafe(len);
-        const fd  = fs.openSync(segPath, 'r');
-        fs.readSync(fd, buf, 0, len, offset);
-        fs.closeSync(fd);
-        offset += len;
-        const ok = res.write(buf);
-        if (!ok) await new Promise(r => res.once('drain', r));
-      }
-    } catch {
-      // Transient read error (e.g. Windows file lock) — retry unless file is gone
-      if (!fs.existsSync(segPath)) break;
-    }
-    // Segment is finalized when next segment file appears or ffmpeg exits
-    if (session.done || fs.existsSync(nextPath)) {
-      // One final read for any bytes written in the last polling gap
-      try {
-        const finalSize = fs.statSync(segPath).size;
-        if (finalSize > offset) {
-          const len = finalSize - offset;
-          const buf = Buffer.allocUnsafe(len);
-          const fd  = fs.openSync(segPath, 'r');
-          fs.readSync(fd, buf, 0, len, offset);
-          fs.closeSync(fd);
-          res.write(buf);
-        }
-      } catch {}
-      break;
-    }
-    await new Promise(r => setTimeout(r, 50));
-  }
-
-  res.end();
-});
 
 // Remux: video passthrough, stereo AAC audio, subtitles stripped
 app.get('/remux', (req, res) => {
@@ -510,6 +370,28 @@ app.get('/file', (req, res) => {
   }
 });
 
+// ── Thumbnail extraction ───────────────────────────────────────────
+app.get('/thumbnail', (req, res) => {
+  const filePath = decodeURIComponent(req.query.path || '');
+  const t = parseFloat(req.query.t || '0');
+  if (!filePath || !fs.existsSync(filePath)) return res.status(404).send('Not found');
+  if (!ffmpegPath) return res.status(500).send('ffmpeg not available');
+  res.setHeader('Content-Type', 'image/jpeg');
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  const proc = spawn(ffmpegPath, [
+    '-hide_banner', '-loglevel', 'error',
+    '-ss', String(Math.max(0, t)),
+    '-i', toFfmpegPath(filePath),
+    '-frames:v', '1', '-q:v', '5',
+    '-vf', 'scale=640:-2',
+    '-f', 'image2', 'pipe:1'
+  ]);
+  proc.stdout.pipe(res);
+  proc.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end(); });
+  proc.on('close', () => { if (!res.writableEnded) res.end(); });
+  req.on('close', () => { try { proc.kill('SIGKILL'); } catch {} });
+});
+
 // ── Directory browser ──────────────────────────────────────────────
 function browseDirectory(dirPath) {
   if (!dirPath) dirPath = process.platform === 'win32' ? path.join(os.homedir(), 'Videos') : os.homedir();
@@ -551,4 +433,4 @@ function startFileServer() {
 }
 function stopFileServer() { return new Promise(resolve => server?.close(resolve)); }
 
-module.exports = { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, generateSession, stopSession, TRANSCODE_EXTS, startSegmentSession, stopSegmentSession, stopAllSegmentSessions };
+module.exports = { startFileServer, stopFileServer, getLocalIP, browseDirectory, getStreamInfo, generateSession, stopSession, TRANSCODE_EXTS };
