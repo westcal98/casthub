@@ -89,7 +89,11 @@ class CastManager {
             if (this._statusInterval) clearInterval(this._statusInterval);
             this._statusInterval = setInterval(() => {
               if (this.player && (this.state.status === 'playing' || this.state.status === 'paused')) {
-                this.player.getStatus((err, s) => { if (s && !err) this._applyStatus(s); });
+                this.player.getStatus((err, s) => {
+                  if (s && !err) {
+                    try { this._applyStatus(s); } catch (e) { console.error('[CastHub] poll _applyStatus error:', e.message); }
+                  }
+                });
               }
             }, 1000);
             resolve();
@@ -207,7 +211,11 @@ class CastManager {
         this._applyStatus(status);
         this._statusInterval = setInterval(() => {
           if (this.player && (this.state.status === 'playing' || this.state.status === 'paused')) {
-            this.player.getStatus((err, s) => { if (s && !err) this._applyStatus(s); });
+            this.player.getStatus((err, s) => {
+              if (s && !err) {
+                try { this._applyStatus(s); } catch (e) { console.error('[CastHub] poll _applyStatus error:', e.message); }
+              }
+            });
           }
         }, 1000);
         resolve();

@@ -358,8 +358,7 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
         livePausedAt = getLiveTime();
         stopLiveTimer();
         savePosition(currentFilePath, livePausedAt, liveDuration);
-        try { await castManager.control('pause'); }
-        catch { await castManager.softStop(); } // fallback if native pause rejected
+        await castManager.control('pause');
         const ps = { ...castManager.getState(), status:'paused',
                      currentTime:livePausedAt, duration:liveDuration, connected:true };
         mainWindow?.webContents.send('cast-state', ps);
@@ -409,7 +408,8 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       if (action === 'pause') {
         livePausedAt = getLiveTime();
         stopLiveTimer();
-        await castManager.softStop();
+        savePosition(currentFilePath, livePausedAt, liveDuration);
+        await castManager.control('pause');
         const ps = { ...castManager.getState(), status:'paused',
                      currentTime:livePausedAt, duration:liveDuration, connected:true };
         mainWindow?.webContents.send('cast-state', ps);
@@ -420,10 +420,9 @@ ipcMain.handle('cast-control', async (_, { action, value }) => {
       if (action === 'play') {
         const resumeAt = livePausedAt !== null ? livePausedAt : getLiveTime();
         livePausedAt = null;
-        const url = `http://${getLocalIP()}:8765/remux?path=${encodeURIComponent(currentFilePath)}&seek=${Math.floor(resumeAt)}`;
-        try { await castManager.reloadURL(url, st.title); }
-        catch { await castManager.castURL(st.deviceHost, url, st.title); }
+        await castManager.control('play');
         startLiveTimer(resumeAt, liveDuration);
+        startPositionSave();
         const ns = { ...castManager.getState(), currentTime:resumeAt, duration:liveDuration };
         broadcast({ type:'state', ...ns });
         mainWindow?.webContents.send('cast-state', ns);
